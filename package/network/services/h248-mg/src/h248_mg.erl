@@ -79,15 +79,26 @@ start_fxs_port() ->
     Device = os:getenv("H248_DEVICE", "/dev/en75xx-fxs0"),
     Port = open_port({spawn, "/usr/bin/en75xx_fxs_port"}, [binary, {packet, line}]),
     port_command(Port, "OPEN " ++ Device ++ "\n"),
-    spawn(?MODULE, port_loop, [Port]).
+    Pid = spawn(?MODULE, port_loop, [Port]),
+    register(h248_fxs, Pid),
+    ok.
 
 port_loop(Port) ->
     receive
         {Port, {data, Line}} ->
             io:format("h248_mg: fxs ~s", [Line]),
             port_loop(Port);
+        {cmd, Cmd} ->
+            port_command(Port, Cmd ++ "\n"),
+            port_loop(Port);
         {Port, closed} -> ok;
         _ -> port_loop(Port)
+    end.
+
+fxs_cmd(Cmd) ->
+    case whereis(h248_fxs) of
+        undefined -> ok;
+        Pid -> Pid ! {cmd, Cmd}, ok
     end.
 
 handle_connect(_Handle, _Info) -> {ok, []}.
@@ -105,6 +116,16 @@ handle_trans_request(ConnHandle, _Proto, [AR]) ->
                     {discard_ack,
                      [#'ActionReply'{contextId = ContextId,
                                      commandReply = [{serviceChangeReply, Rep}]}]};
+                {addReq, Amm} ->
+                    fxs_cmd("RING ON"),
+                    amm_reply(ContextId, addReply, Amm);
+                {modifyReq, Amm} ->
+                    fxs_cmd("LINEFEED 2"),
+                    amm_reply(ContextId, modifyReply, Amm);
+                {subtractReq, Amm} ->
+                    fxs_cmd("RING OFF"),
+                    fxs_cmd("LINEFEED 1"),
+                    amm_reply(ContextId, subtractReply, Amm);
                 _ ->
                     not_implemented(ContextId)
             end;
@@ -136,6 +157,13 @@ service_change_reply(ConnHandle, SCR) ->
                                        #'ErrorDescriptor'{errorCode = ?megaco_not_implemented,
                                                           errorText = "Only root supported"}}}
     end.
+
+amm_reply(ContextId, Tag, Amm) ->
+    TID = Amm#'AmmRequest'.terminationID,
+    Reply = #'AmmsReply'{terminationID = TID},
+    {discard_ack,
+     [#'ActionReply'{contextId = ContextId,
+                     commandReply = [{Tag, Reply}]}]}.
 
 not_implemented(ContextId) ->
     ED = #'ErrorDescriptor'{errorCode = ?megaco_not_implemented,

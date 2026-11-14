@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=h248-mg
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=Apache-2.0 GPL-2.0-only
 ERLC:=$(STAGING_DIR_HOSTPKG)/lib/erlang/bin/erlc
 MEGACO_INCLUDE:=$(wildcard $(STAGING_DIR_HOSTPKG)/lib/erlang/lib/megaco-*/include)
