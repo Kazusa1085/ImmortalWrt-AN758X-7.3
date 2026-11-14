@@ -170,12 +170,16 @@ add_rtp_termination(Amm) ->
     TID = Amm#'AmmRequest'.terminationID,
     case ets:lookup(h248_terms, {term, TID}) of
         [] ->
-            [{rtp_port, Port}] = ets:lookup(h248_terms, rtp_port),
-            case h248_rtp:start(Port) of
-                {ok, Socket} ->
-                    ets:insert(h248_terms, {{term, TID}, Socket, Port});
-                Other ->
-                    io:format("h248_mg: rtp open failed: ~p~n", [Other])
+            case find_remote(Amm) of
+                {ok, Ip, Port} ->
+                    case h248_media:start(Ip, Port) of
+                        {ok, Pid} ->
+                            ets:insert(h248_terms, {{term, TID}, media, Pid, Ip, Port});
+                        Other ->
+                            io:format("h248_mg: media open failed: ~p~n", [Other])
+                    end;
+                not_found ->
+                    io:format("h248_mg: no remote SDP for ~p~n", [TID])
             end;
         _ -> ok
     end.
@@ -183,10 +187,45 @@ add_rtp_termination(Amm) ->
 del_rtp_termination(Amm) ->
     TID = Amm#'AmmRequest'.terminationID,
     case ets:lookup(h248_terms, {term, TID}) of
-        [{_, Socket, _}] ->
-            catch h248_rtp:stop(Socket),
+        [{_, media, _Pid, _Ip, _Port}] ->
+            catch h248_media:stop(),
             ets:delete(h248_terms, {term, TID});
         [] -> ok
+    end.
+
+find_remote(Term) ->
+    Bins = collect_bins(Term, []),
+    find_sdp_remote(Bins).
+
+collect_bins(B, Acc) when is_binary(B) -> [B | Acc];
+collect_bins(T, Acc) when is_tuple(T) -> collect_bins(tuple_to_list(T), Acc);
+collect_bins([H | T], Acc) -> collect_bins(T, collect_bins(H, Acc));
+collect_bins(_, Acc) -> Acc.
+
+find_c([]) -> not_found;
+find_c([B | Rest]) ->
+    case binary:match(B, <<"c=IN IP4 ">>) of
+        {Pos, Len} ->
+            Tail = binary:part(B, Pos + Len, byte_size(B) - Pos - Len),
+            [Ip | _] = binary:split(Tail, [<<"\r">>, <<"\n">>, <<" ">>], [global]),
+            {ok, binary_to_list(Ip)};
+        nomatch -> find_c(Rest)
+    end.
+
+find_m([]) -> not_found;
+find_m([B | Rest]) ->
+    case binary:match(B, <<"m=audio ">>) of
+        {Pos, Len} ->
+            Tail = binary:part(B, Pos + Len, byte_size(B) - Pos - Len),
+            [PortBin | _] = binary:split(Tail, <<" ">>, [global]),
+            {ok, binary_to_integer(PortBin)};
+        nomatch -> find_m(Rest)
+    end.
+
+find_sdp_remote(Bins) ->
+    case {find_c(Bins), find_m(Bins)} of
+        {{ok, Ip}, {ok, Port}} -> {ok, Ip, Port};
+        _ -> not_found
     end.
 
 amm_reply(ContextId, Tag, Amm) ->
