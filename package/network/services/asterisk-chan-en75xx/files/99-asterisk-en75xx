@@ -48,6 +48,14 @@ if [ -f "$musiconhold" ]; then
 	fi
 fi
 
+pjsip=/etc/asterisk/pjsip.conf
+if [ -f "$pjsip" ]; then
+	pjsip_include='#include "pjsip-en75xx.conf"'
+	if ! grep -qxF "$pjsip_include" "$pjsip"; then
+		printf '\n%s\n' "$pjsip_include" >> "$pjsip"
+	fi
+fi
+
 features=/etc/asterisk/features.conf
 if [ -f "$features" ]; then
 	feature_include='#include "features-en75xx.conf"'
@@ -59,8 +67,14 @@ fi
 extensions=/etc/asterisk/extensions.conf
 include='#include "extensions-en75xx.conf"'
 
-if [ -f "$extensions" ] && ! grep -qxF "$include" "$extensions"; then
-	printf '\n%s\n' "$include" >> "$extensions"
+if [ -f "$extensions" ]; then
+	generated_include='#include "extensions-en75xx-generated.conf"'
+	if ! grep -qxF "$include" "$extensions"; then
+		printf '\n%s\n' "$include" >> "$extensions"
+	fi
+	if ! grep -qxF "$generated_include" "$extensions"; then
+		printf '%s\n' "$generated_include" >> "$extensions"
+	fi
 fi
 
 [ ! -x /etc/init.d/asterisk ] || /etc/init.d/asterisk enable
