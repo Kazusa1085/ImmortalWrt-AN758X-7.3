@@ -255,8 +255,11 @@ static int airoha_ppe_debugfs_tunnels_show(struct seq_file *m, void *private)
 		if (!entry->valid)
 			continue;
 		seq_printf(m, "%s id=%u age=%lu jiffies\n",
-			   entry->type == AIROHA_TUNNEL_GRE ? "gre" : "vxlan",
-			   entry->id, jiffies - entry->last_seen);
+			   entry->meta.type == AIROHA_TUNNEL_GRE ? "gre" : "vxlan",
+			   entry->meta.id, jiffies - entry->last_seen);
+		seq_printf(m, "  src=%pI4 dst=%pI4 sport=%u dport=%u\n",
+			   &entry->meta.src, &entry->meta.dst,
+			   ntohs(entry->meta.sport), ntohs(entry->meta.dport));
 	}
 	spin_unlock_irqrestore(&ppe->tunnel_lock, flags);
 	return 0;

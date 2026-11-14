@@ -21,6 +21,7 @@
 #include <linux/jiffies.h>
 #include <net/route.h>
 #include <net/ip_tunnels.h>
+#include <net/flow_dissector.h>
 #if IS_ENABLED(CONFIG_L2TP)
 #include <net/l2tp_offload.h>
 #endif
@@ -52,16 +53,12 @@ static const struct rhashtable_params airoha_l2_flow_table_params = {
 #define AIROHA_VXLAN_PORT 4789
 #define AIROHA_VXLAN_PORT_LEGACY 8472
 
-/* Minimal L2TPv2/IPv4-over-UDP parser used by the PPE diagnostics path.
- * It validates the outer UDP/L2TPv2 header and records the session tuple;
- * the PPE entry itself is left to the normal flow-offload path until a
- * dedicated L2TP flow action is available.
+/* Tunnel parsers for the PPE observability path.  They record the
+ * outer tuple and the tunnel key/VNI; the actual FOE programming is a
+ * separate step and is intentionally not claimed here.
  */
-/* Minimal UDP/IPv4 VXLAN detector used by the PPE diagnostics path.
- * It validates the outer UDP port and VXLAN VNI flag; the actual PPE
- * entry remains on the normal flow path until a tunnel action exists.
- */
-static bool airoha_ppe_vxlan_parse(const struct sk_buff *skb, u32 *vni)
+static bool airoha_ppe_vxlan_parse(const struct sk_buff *skb,
+				   struct airoha_tunnel_meta *meta)
 {
 	struct iphdr iph_buf;
 	struct udphdr udp_buf;
@@ -91,14 +88,18 @@ static bool airoha_ppe_vxlan_parse(const struct sk_buff *skb, u32 *vni)
 	if (!vxlan || !(vxlan[0] & 0x08))
 		return false;
 
-	*vni = ((u32)vxlan[4] << 16) | ((u32)vxlan[5] << 8) | vxlan[6];
+	memset(meta, 0, sizeof(*meta));
+	meta->type = AIROHA_TUNNEL_VXLAN;
+	meta->id = ((u32)vxlan[4] << 16) | ((u32)vxlan[5] << 8) | vxlan[6];
+	meta->src = iph->saddr;
+	meta->dst = iph->daddr;
+	meta->sport = udp->source;
+	meta->dport = udp->dest;
 	return true;
 }
 
-/* Minimal IPv4 GRE detector.  A keyed GRE header is accepted as a tunnel
- * candidate; the key itself is not used until the PPE GRE action exists.
- */
-static bool airoha_ppe_gre_parse(const struct sk_buff *skb, u16 *key)
+static bool airoha_ppe_gre_parse(const struct sk_buff *skb,
+				 struct airoha_tunnel_meta *meta)
 {
 	struct iphdr iph_buf;
 	u8 gre_buf[8];
@@ -106,6 +107,7 @@ static bool airoha_ppe_gre_parse(const struct sk_buff *skb, u16 *key)
 	const u8 *gre;
 	unsigned int off;
 	u16 flags;
+	u16 proto;
 
 	iph = skb_header_pointer(skb, skb_network_offset(skb),
 				 sizeof(iph_buf), &iph_buf);
@@ -121,8 +123,18 @@ static bool airoha_ppe_gre_parse(const struct sk_buff *skb, u16 *key)
 	flags = ((u16)gre[0] << 8) | gre[1];
 	if (flags & 0x0007)	/* unsupported GRE version */
 		return false;
-	*key = (flags & 0x2000) && sizeof(gre_buf) >= 8 ?
-	       (((u16)gre[4] << 8) | gre[5]) : 0;
+	proto = ((u16)gre[2] << 8) | gre[3];
+	if (!proto)
+		return false;
+
+	memset(meta, 0, sizeof(*meta));
+	meta->type = AIROHA_TUNNEL_GRE;
+	meta->id = flags & 0x2000 && sizeof(gre_buf) >= 8 ?
+		   (((u32)gre[4] << 24) | ((u32)gre[5] << 16) |
+		    ((u32)gre[6] << 8) | gre[7]) : 0;
+	meta->inner_proto = proto;
+	meta->src = iph->saddr;
+	meta->dst = iph->daddr;
 	return true;
 }
 
@@ -264,8 +276,8 @@ static int airoha_ppe_l2tp_notify(struct notifier_block *nb,
 	return NOTIFY_OK;
 }
 
-static void airoha_ppe_tunnel_cache_update(struct airoha_ppe *ppe, u8 type,
-					       u32 id)
+static void airoha_ppe_tunnel_cache_update(struct airoha_ppe *ppe,
+					       const struct airoha_tunnel_meta *meta)
 {
 	struct airoha_tunnel_cache_entry *free_entry = NULL;
 	unsigned long flags;
@@ -275,7 +287,8 @@ static void airoha_ppe_tunnel_cache_update(struct airoha_ppe *ppe, u8 type,
 	for (i = 0; i < AIROHA_TUNNEL_MAX_ENTRIES; i++) {
 		struct airoha_tunnel_cache_entry *entry = &ppe->tunnel_cache[i];
 
-		if (entry->valid && entry->type == type && entry->id == id) {
+		if (entry->valid && entry->meta.type == meta->type &&
+		    entry->meta.id == meta->id) {
 			entry->last_seen = jiffies;
 			goto out;
 		}
@@ -284,11 +297,29 @@ static void airoha_ppe_tunnel_cache_update(struct airoha_ppe *ppe, u8 type,
 	}
 	if (free_entry) {
 		free_entry->valid = true;
-		free_entry->type = type;
-		free_entry->id = id;
+		free_entry->meta = *meta;
 		free_entry->last_seen = jiffies;
 	}
 out:
+	spin_unlock_irqrestore(&ppe->tunnel_lock, flags);
+}
+
+static void airoha_ppe_tunnel_cache_invalidate(struct airoha_ppe *ppe,
+						 u8 type, u32 id)
+{
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&ppe->tunnel_lock, flags);
+	for (i = 0; i < AIROHA_TUNNEL_MAX_ENTRIES; i++) {
+		struct airoha_tunnel_cache_entry *entry = &ppe->tunnel_cache[i];
+
+		if (entry->valid && entry->meta.type == type &&
+		    entry->meta.id == id) {
+			entry->valid = false;
+			break;
+		}
+	}
 	spin_unlock_irqrestore(&ppe->tunnel_lock, flags);
 }
 
@@ -1818,8 +1849,7 @@ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
 	struct hlist_node *n;
 	u32 index, state;
 	u16 l2tp_tunnel, l2tp_session;
-	u16 gre_key;
-	u32 vxlan_vni;
+	struct airoha_tunnel_meta tunnel_meta;
 	u8 l2tp_hdr_len;
 	int err;
 
@@ -1827,14 +1857,13 @@ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
 	atomic64_inc(&ppe->gre_seen);
 	atomic64_inc(&ppe->vxlan_seen);
 	atomic64_inc(&ppe->l2tp_seen);
-	if (airoha_ppe_vxlan_parse(skb, &vxlan_vni)) {
+	if (airoha_ppe_vxlan_parse(skb, &tunnel_meta)) {
 		atomic64_inc(&ppe->vxlan_candidates);
-		airoha_ppe_tunnel_cache_update(ppe, AIROHA_TUNNEL_VXLAN,
-					       vxlan_vni);
+		airoha_ppe_tunnel_cache_update(ppe, &tunnel_meta);
 	}
-	if (airoha_ppe_gre_parse(skb, &gre_key)) {
+	if (airoha_ppe_gre_parse(skb, &tunnel_meta)) {
 		atomic64_inc(&ppe->gre_candidates);
-		airoha_ppe_tunnel_cache_update(ppe, AIROHA_TUNNEL_GRE, gre_key);
+		airoha_ppe_tunnel_cache_update(ppe, &tunnel_meta);
 	}
 	if (airoha_ppe_l2tpv2_parse(skb, &l2tp_tunnel, &l2tp_session,
 				     &l2tp_hdr_len))
@@ -2159,22 +2188,79 @@ static int airoha_ppe_flow_offload_replace(struct airoha_eth *eth,
 			if (data.tunnel.num)
 				return -EOPNOTSUPP;
 
-			data.tunnel.type = act->id == FLOW_ACTION_TUNNEL_ENCAP ?
-					   AIROHA_TUNNEL_GRE : AIROHA_TUNNEL_VXLAN;
 			data.tunnel.decap =
 				act->id == FLOW_ACTION_TUNNEL_DECAP;
-			data.tunnel.id = act->tunnel ?
-					be64_to_cpu(act->tunnel->key.tun_id) & 0xffffffff : 0;
 			data.tunnel.num = 1;
+			if (act->tunnel) {
+				const struct ip_tunnel_info *info = act->tunnel;
+
+				data.tunnel.type =
+					test_bit(IP_TUNNEL_VXLAN_OPT_BIT,
+						 info->key.tun_flags) ||
+					info->key.tp_dst == htons(AIROHA_VXLAN_PORT) ?
+					AIROHA_TUNNEL_VXLAN : AIROHA_TUNNEL_GRE;
+				data.tunnel.id =
+					be64_to_cpu(info->key.tun_id) & 0xffffffff;
+				data.tunnel.ipv6 =
+					!!(info->mode & IP_TUNNEL_INFO_IPV6);
+				if (data.tunnel.ipv6) {
+					data.tunnel.src6 = info->key.u.ipv6.src;
+					data.tunnel.dst6 = info->key.u.ipv6.dst;
+				} else {
+					data.tunnel.src = info->key.u.ipv4.src;
+					data.tunnel.dst = info->key.u.ipv4.dst;
+				}
+				data.tunnel.sport = info->key.tp_src;
+				data.tunnel.dport = info->key.tp_dst;
+			}
 			break;
 		default:
 			return -EOPNOTSUPP;
 		}
 	}
 
-	if (!is_valid_ether_addr(data.eth.h_source) ||
-	    !is_valid_ether_addr(data.eth.h_dest))
-		return -EINVAL;
+	if (data.tunnel.num) {
+		if (!data.tunnel.id &&
+		    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_KEYID)) {
+			struct flow_match_enc_keyid match;
+
+			flow_rule_match_enc_keyid(rule, &match);
+			data.tunnel.id = be32_to_cpu(match.key->keyid);
+		}
+		if (flow_rule_match_key(rule,
+					FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS)) {
+			struct flow_match_ipv4_addrs match;
+
+			flow_rule_match_enc_ipv4_addrs(rule, &match);
+			data.tunnel.src = match.key->src;
+			data.tunnel.dst = match.key->dst;
+		}
+		if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_PORTS)) {
+			struct flow_match_ports match;
+
+			flow_rule_match_enc_ports(rule, &match);
+			data.tunnel.sport = match.key->src;
+			data.tunnel.dport = match.key->dst;
+		}
+		if (!data.tunnel.type)
+			data.tunnel.type =
+				(data.tunnel.dport == htons(AIROHA_VXLAN_PORT) ||
+				 data.tunnel.dport == htons(AIROHA_VXLAN_PORT_LEGACY)) ?
+				AIROHA_TUNNEL_VXLAN : AIROHA_TUNNEL_GRE;
+		if (eth->ppe) {
+			struct airoha_tunnel_meta meta = {
+				.type = data.tunnel.type,
+				.decap = data.tunnel.decap,
+				.id = data.tunnel.id,
+				.src = data.tunnel.src,
+				.dst = data.tunnel.dst,
+				.sport = data.tunnel.sport,
+				.dport = data.tunnel.dport,
+			};
+
+			airoha_ppe_tunnel_cache_update(eth->ppe, &meta);
+		}
+	}
 
 	err = airoha_ppe_foe_entry_prepare(eth, &hwe, odev, offload_type,
 					   &data, l4proto, dsfield,
@@ -2258,6 +2344,17 @@ static int airoha_ppe_flow_offload_replace(struct airoha_eth *eth,
 	INIT_LIST_HEAD(&e->gc_node);
 	e->cookie = f->cookie;
 	e->egress_dev = egress_dev;
+	e->tunnel.type = data.tunnel.type;
+	e->tunnel.decap = data.tunnel.decap;
+	e->tunnel.ipv6 = data.tunnel.ipv6;
+	e->tunnel.inner_proto = data.tunnel.inner_proto;
+	e->tunnel.id = data.tunnel.id;
+	e->tunnel.src = data.tunnel.src;
+	e->tunnel.dst = data.tunnel.dst;
+	e->tunnel.sport = data.tunnel.sport;
+	e->tunnel.dport = data.tunnel.dport;
+	e->tunnel.src6 = data.tunnel.src6;
+	e->tunnel.dst6 = data.tunnel.dst6;
 	memcpy(&e->data, &hwe, sizeof(e->data));
 
 	err = airoha_ppe_foe_flow_commit_entry(eth->ppe, e);
@@ -2289,6 +2386,10 @@ static int airoha_ppe_flow_offload_destroy(struct airoha_eth *eth,
 	if (!e)
 		return -ENOENT;
 
+	if (e->tunnel.type)
+		airoha_ppe_tunnel_cache_invalidate(eth->ppe,
+						   e->tunnel.type,
+						   e->tunnel.id);
 	airoha_ppe_foe_flow_remove_entry(eth->ppe, e);
 	rhashtable_remove_fast(&eth->flow_table, &e->node,
 			       airoha_flow_table_params);

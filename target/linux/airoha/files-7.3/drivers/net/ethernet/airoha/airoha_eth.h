@@ -552,6 +552,14 @@ struct airoha_flow_data {
 		u64 id;
 		u8 type;
 		u8 decap;
+		u8 ipv6;
+		u8 inner_proto;
+		__be32 src;
+		__be32 dst;
+		__be16 sport;
+		__be16 dport;
+		struct in6_addr src6;
+		struct in6_addr dst6;
 		u8 num;
 	} tunnel;
 };
@@ -560,6 +568,25 @@ enum airoha_flow_entry_type {
 	FLOW_TYPE_L4,
 	FLOW_TYPE_L2,
 	FLOW_TYPE_L2_SUBFLOW,
+};
+
+enum airoha_tunnel_type {
+	AIROHA_TUNNEL_GRE = 1,
+	AIROHA_TUNNEL_VXLAN,
+};
+
+struct airoha_tunnel_meta {
+	u8 type;
+	u8 decap;
+	u8 ipv6;
+	u8 inner_proto;
+	u32 id;
+	__be32 src;
+	__be32 dst;
+	__be16 sport;
+	__be16 dport;
+	struct in6_addr src6;
+	struct in6_addr dst6;
 };
 
 struct airoha_flow_table_entry {
@@ -584,6 +611,7 @@ struct airoha_flow_table_entry {
 	 * only FOEs attached to the affected PON egress device.
 	 */
 	struct airoha_gdm_dev *egress_dev;
+	struct airoha_tunnel_meta tunnel;
 	struct list_head gc_node;
 
 	/* Must be last --ends in a flexible-array member. */
@@ -726,15 +754,9 @@ struct airoha_gdm_port {
 #define AIROHA_L2TP_MAX_SESSIONS 16
 #define AIROHA_L2TP_MAX_HDR 32
 
-enum airoha_tunnel_type {
-	AIROHA_TUNNEL_GRE = 1,
-	AIROHA_TUNNEL_VXLAN,
-};
-
 struct airoha_tunnel_cache_entry {
 	bool valid;
-	u8 type;
-	u32 id;
+	struct airoha_tunnel_meta meta;
 	unsigned long last_seen;
 };
 
