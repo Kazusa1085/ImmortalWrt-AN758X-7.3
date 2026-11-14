@@ -739,6 +739,12 @@ struct airoha_ppe {
 	atomic64_t bind_failed;
 	atomic64_t l2tp_seen;
 	atomic64_t l2tp_candidates;
+	atomic64_t l2_bridge_seen;
+	atomic64_t l2_bridge_committed;
+	atomic64_t gre_seen;
+	atomic64_t gre_candidates;
+	atomic64_t vxlan_seen;
+	atomic64_t vxlan_candidates;
 	atomic64_t l2tp_kernel_events;
 	atomic64_t l2tp_kernel_sessions;
 	u32 l2tp_last_tunnel;

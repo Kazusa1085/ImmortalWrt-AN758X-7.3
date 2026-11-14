@@ -48,12 +48,83 @@ static const struct rhashtable_params airoha_l2_flow_table_params = {
 };
 
 #define AIROHA_L2TPV2_PORT 1701
+#define AIROHA_VXLAN_PORT 4789
+#define AIROHA_VXLAN_PORT_LEGACY 8472
 
 /* Minimal L2TPv2/IPv4-over-UDP parser used by the PPE diagnostics path.
  * It validates the outer UDP/L2TPv2 header and records the session tuple;
  * the PPE entry itself is left to the normal flow-offload path until a
  * dedicated L2TP flow action is available.
  */
+/* Minimal UDP/IPv4 VXLAN detector used by the PPE diagnostics path.
+ * It validates the outer UDP port and VXLAN VNI flag; the actual PPE
+ * entry remains on the normal flow path until a tunnel action exists.
+ */
+static bool airoha_ppe_vxlan_parse(const struct sk_buff *skb, u32 *vni)
+{
+	struct iphdr iph_buf;
+	struct udphdr udp_buf;
+	u8 vxlan_buf[8];
+	const struct iphdr *iph;
+	const struct udphdr *udp;
+	const u8 *vxlan;
+	unsigned int off;
+
+	iph = skb_header_pointer(skb, skb_network_offset(skb),
+				 sizeof(iph_buf), &iph_buf);
+	if (!iph || iph->version != 4 || iph->protocol != IPPROTO_UDP ||
+	    ip_is_fragment(iph))
+		return false;
+
+	off = skb_network_offset(skb) + iph->ihl * 4;
+	udp = skb_header_pointer(skb, off, sizeof(udp_buf), &udp_buf);
+	if (!udp ||
+	    (ntohs(udp->dest) != AIROHA_VXLAN_PORT &&
+	     ntohs(udp->dest) != AIROHA_VXLAN_PORT_LEGACY &&
+	     ntohs(udp->source) != AIROHA_VXLAN_PORT &&
+	     ntohs(udp->source) != AIROHA_VXLAN_PORT_LEGACY))
+		return false;
+
+	off += sizeof(*udp);
+	vxlan = skb_header_pointer(skb, off, sizeof(vxlan_buf), vxlan_buf);
+	if (!vxlan || !(vxlan[0] & 0x08))
+		return false;
+
+	*vni = ((u32)vxlan[4] << 16) | ((u32)vxlan[5] << 8) | vxlan[6];
+	return true;
+}
+
+/* Minimal IPv4 GRE detector.  A keyed GRE header is accepted as a tunnel
+ * candidate; the key itself is not used until the PPE GRE action exists.
+ */
+static bool airoha_ppe_gre_parse(const struct sk_buff *skb, u16 *key)
+{
+	struct iphdr iph_buf;
+	u8 gre_buf[8];
+	const struct iphdr *iph;
+	const u8 *gre;
+	unsigned int off;
+	u16 flags;
+
+	iph = skb_header_pointer(skb, skb_network_offset(skb),
+				 sizeof(iph_buf), &iph_buf);
+	if (!iph || iph->version != 4 || iph->protocol != IPPROTO_GRE ||
+	    ip_is_fragment(iph))
+		return false;
+
+	off = skb_network_offset(skb) + iph->ihl * 4;
+	gre = skb_header_pointer(skb, off, sizeof(gre_buf), gre_buf);
+	if (!gre)
+		return false;
+
+	flags = ((u16)gre[0] << 8) | gre[1];
+	if (flags & 0x0007)	/* unsupported GRE version */
+		return false;
+	*key = (flags & 0x2000) && sizeof(gre_buf) >= 8 ?
+	       (((u16)gre[4] << 8) | gre[5]) : 0;
+	return true;
+}
+
 static bool airoha_ppe_l2tpv2_parse(const struct sk_buff *skb,
 				    u16 *tunnel_id, u16 *session_id,
 				    u8 *hdr_len)
@@ -1697,18 +1768,29 @@ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
 	struct hlist_node *n;
 	u32 index, state;
 	u16 l2tp_tunnel, l2tp_session;
+	u16 gre_key;
+	u32 vxlan_vni;
 	u8 l2tp_hdr_len;
 	int err;
 
 	atomic64_inc(&ppe->flows_seen);
+	atomic64_inc(&ppe->gre_seen);
+	atomic64_inc(&ppe->vxlan_seen);
 	atomic64_inc(&ppe->l2tp_seen);
+	if (airoha_ppe_vxlan_parse(skb, &vxlan_vni))
+		atomic64_inc(&ppe->vxlan_candidates);
+	if (airoha_ppe_gre_parse(skb, &gre_key))
+		atomic64_inc(&ppe->gre_candidates);
 	if (airoha_ppe_l2tpv2_parse(skb, &l2tp_tunnel, &l2tp_session,
 				     &l2tp_hdr_len))
 		atomic64_inc(&ppe->l2tp_candidates);
 
-	if (!local)
+	if (!local) {
 		bridge_ready = airoha_ppe_foe_prepare_bridge_subflow(ppe, skb,
 							     &bridge_hwe);
+		if (bridge_ready)
+			atomic64_inc(&ppe->l2_bridge_seen);
+	}
 
 	spin_lock_bh(&ppe_lock);
 
@@ -1764,12 +1846,17 @@ l2_lookup:
 	airoha_ppe_foe_set_bridge_addrs(&br, eth_hdr(skb));
 	e = rhashtable_lookup_fast(&ppe->l2_flows, &br,
 				   airoha_l2_flow_table_params);
-	if (e)
-		airoha_ppe_count_bind(ppe,
-			airoha_ppe_foe_commit_subflow_entry(ppe, e, hash, rx_wlan));
-	else if (bridge_ready)
-		airoha_ppe_count_bind(ppe,
-			airoha_ppe_foe_commit_subflow(ppe, &bridge_hwe, hash, rx_wlan));
+	if (e) {
+		err = airoha_ppe_foe_commit_subflow_entry(ppe, e, hash, rx_wlan);
+		airoha_ppe_count_bind(ppe, err);
+		if (!err)
+			atomic64_inc(&ppe->l2_bridge_committed);
+	} else if (bridge_ready) {
+		err = airoha_ppe_foe_commit_subflow(ppe, &bridge_hwe, hash, rx_wlan);
+		airoha_ppe_count_bind(ppe, err);
+		if (!err)
+			atomic64_inc(&ppe->l2_bridge_committed);
+	}
 unlock:
 	spin_unlock_bh(&ppe_lock);
 }

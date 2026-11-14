@@ -227,7 +227,7 @@ static int airoha_ppe_debugfs_stats_show(struct seq_file *m, void *private)
 	struct airoha_ppe *ppe = m->private;
 
 	seq_printf(m,
-	           "flows_seen: %llu\nunbound_seen: %llu\nbind_committed: %llu\nbind_failed: %llu\nl2tp_seen: %llu\nl2tp_candidates: %llu\nl2tp_kernel_events: %llu\nl2tp_kernel_sessions: %llu\nl2tp_last_tunnel: %u\nl2tp_last_session: %u\n",
+	           "flows_seen: %llu\nunbound_seen: %llu\nbind_committed: %llu\nbind_failed: %llu\nl2_bridge_seen: %llu\nl2_bridge_committed: %llu\ngre_seen: %llu\ngre_candidates: %llu\nvxlan_seen: %llu\nvxlan_candidates: %llu\nl2tp_seen: %llu\nl2tp_candidates: %llu\nl2tp_kernel_events: %llu\nl2tp_kernel_sessions: %llu\nl2tp_last_tunnel: %u\nl2tp_last_session: %u\n",
 	           (unsigned long long)atomic64_read(&ppe->flows_seen),
 	           (unsigned long long)atomic64_read(&ppe->unbound_seen),
 	           (unsigned long long)atomic64_read(&ppe->bind_committed),
