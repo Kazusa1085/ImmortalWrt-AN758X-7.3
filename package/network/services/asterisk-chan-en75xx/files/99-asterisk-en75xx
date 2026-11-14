@@ -40,6 +40,14 @@ if [ -f "$indications" ]; then
 	fi
 fi
 
+rtp=/etc/asterisk/rtp.conf
+if [ -f "$rtp" ]; then
+	rtp_include='#include "rtp-en75xx.conf"'
+	if ! grep -qxF "$rtp_include" "$rtp"; then
+		printf '\n%s\n' "$rtp_include" >> "$rtp"
+	fi
+fi
+
 musiconhold=/etc/asterisk/musiconhold.conf
 if [ -f "$musiconhold" ]; then
 	moh_include='#include "musiconhold-en75xx.conf"'
