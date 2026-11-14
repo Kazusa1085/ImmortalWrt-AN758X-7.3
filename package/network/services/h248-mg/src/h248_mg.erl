@@ -4,7 +4,7 @@
 %% small: transport and FXS port integration are layered on top.
 -module(h248_mg).
 -behaviour(megaco_user).
--export([start/0, stop/0]).
+-export([start/0, stop/0, port_loop/1]).
 -export([handle_connect/2, handle_disconnect/3,
          handle_syntax_error/3, handle_message_error/3,
          handle_trans_request/3, handle_trans_long_request/3,
@@ -24,6 +24,7 @@ start() ->
     case megaco:start_user(Mid, Config) of
         ok ->
             io:format("h248_mg: megaco user started~n"),
+            start_fxs_port(),
             ok;
         Error ->
             io:format("h248_mg: start_user failed: ~p~n", [Error]),
@@ -33,6 +34,23 @@ start() ->
 stop() ->
     catch megaco:stop_user({deviceName, "en75xx-mg"}),
     ok.
+
+start_fxs_port() ->
+    Device = os:getenv("H248_DEVICE", "/dev/en75xx-fxs0"),
+    Port = open_port({spawn, "/usr/bin/en75xx_fxs_port"}, [binary, {packet, line}]),
+    port_command(Port, "OPEN " ++ Device ++ "\n"),
+    spawn(?MODULE, port_loop, [Port]).
+
+port_loop(Port) ->
+    receive
+        {Port, {data, Line}} ->
+            io:format("h248_mg: fxs ~s", [Line]),
+            port_loop(Port);
+        {Port, closed} ->
+            ok;
+        _Other ->
+            port_loop(Port)
+    end.
 
 handle_connect(_Handle, _Info) -> {ok, []}.
 handle_disconnect(_Handle, _Reason, _Info) -> ok.

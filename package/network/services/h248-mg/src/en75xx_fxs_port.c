@@ -14,6 +14,7 @@
 #include "en75xx_voice.h"
 
 static int fd = -1;
+static int last_hook = -1;
 
 static void reply_ok(const char *what)
 {
@@ -54,6 +55,21 @@ static int cmd_ring(int on)
 	return 0;
 }
 
+static void poll_hook(void)
+{
+	struct en75xx_voice_line_state st;
+
+	if (fd < 0)
+		return;
+	if (ioctl(fd, EN75XX_VOICE_GET_STATE, &st) < 0)
+		return;
+	if ((int)st.hook != last_hook) {
+		last_hook = st.hook;
+		printf("EVENT hook=%u\n", st.hook);
+		fflush(stdout);
+	}
+}
+
 static int cmd_hook(void)
 {
 	struct en75xx_voice_line_state st;
@@ -70,18 +86,44 @@ static int cmd_hook(void)
 	return 0;
 }
 
+static int cmd_linefeed(const char *value)
+{
+	unsigned long lf = strtoul(value, NULL, 0);
+	unsigned int v = (unsigned int)lf;
+
+	if (fd < 0)
+		return -1;
+	if (ioctl(fd, EN75XX_VOICE_SET_LINEFEED, &v) < 0) {
+		printf("ERR linefeed: %s\n", strerror(errno));
+		fflush(stdout);
+		return -1;
+	}
+	reply_ok("linefeed");
+	return 0;
+}
+
 int main(void)
 {
 	char line[256];
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	setvbuf(stdin, NULL, _IOLBF, 0);
-	while (fgets(line, sizeof(line), stdin)) {
+	while (1) {
+		struct pollfd pfd = { .fd = 0, .events = POLLIN };
+		int ready = poll(&pfd, 1, 100);
+
+		poll_hook();
+		if (ready <= 0)
+			continue;
+		if (!fgets(line, sizeof(line), stdin))
+			break;
 		line[strcspn(line, "\r\n")] = 0;
 		if (!strncmp(line, "OPEN ", 5))
 			cmd_open(line + 5);
 		else if (!strcmp(line, "HOOK"))
 			cmd_hook();
+		else if (!strncmp(line, "LINEFEED ", 9))
+			cmd_linefeed(line + 9);
 		else if (!strcmp(line, "RING ON"))
 			cmd_ring(1);
 		else if (!strcmp(line, "RING OFF"))
