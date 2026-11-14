@@ -3,7 +3,7 @@
 %% Protocol stack: Erlang/OTP megaco.  The C port owns /dev/en75xx-fxs0.
 -module(h248_mg).
 -behaviour(megaco_user).
--export([start/0, stop/0, port_loop/1]).
+-export([start/0, stop/0, port_loop/1, fxs_cmd/1]).
 -export([handle_connect/2, handle_disconnect/3,
          handle_syntax_error/3, handle_message_error/3,
          handle_trans_request/3, handle_trans_long_request/3,
@@ -89,7 +89,10 @@ start_fxs_port() ->
 port_loop(Port) ->
     receive
         {Port, {data, Line}} ->
-            io:format("h248_mg: fxs ~s", [Line]),
+            case Line of
+                <<"PCM ", _/binary>> -> h248_media:handle_pcm(Line);
+                _ -> io:format("h248_mg: fxs ~s", [Line])
+            end,
             port_loop(Port);
         {cmd, Cmd} ->
             port_command(Port, Cmd ++ "\n"),

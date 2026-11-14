@@ -29,7 +29,7 @@ endef
 define Build/Compile
 	mkdir -p $(PKG_BUILD_DIR)/ebin
 	$(ERLC) -o $(PKG_BUILD_DIR)/ebin -I$(MEGACO_INCLUDE) \
-		$(CURDIR)/src/h248_mg.erl $(CURDIR)/src/h248_rtp.erl $(CURDIR)/src/h248_sdp.erl $(CURDIR)/src/h248_g711.erl $(CURDIR)/src/megaco_simple_mg.erl
+		$(CURDIR)/src/h248_mg.erl $(CURDIR)/src/h248_rtp.erl $(CURDIR)/src/h248_sdp.erl $(CURDIR)/src/h248_g711.erl $(CURDIR)/src/h248_media.erl $(CURDIR)/src/megaco_simple_mg.erl
 	$(TARGET_CC) $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) \
 		-Wall -Wextra -Werror -I$(CURDIR)/src \
 		-o $(PKG_BUILD_DIR)/en75xx_fxs_port \
