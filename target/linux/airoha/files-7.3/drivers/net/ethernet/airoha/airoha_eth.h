@@ -716,6 +716,20 @@ struct airoha_gdm_port {
 #define AIROHA_RXD4_PPE_CPU_REASON	GENMASK(20, 16)
 #define AIROHA_RXD4_FOE_ENTRY		GENMASK(15, 0)
 
+#define AIROHA_L2TP_MAX_SESSIONS 16
+#define AIROHA_L2TP_MAX_HDR 32
+
+struct airoha_l2tp_cache_entry {
+	bool valid;
+	u16 tunnel_id;
+	u16 session_id;
+	u8 hdr_len;
+	u8 hdr[AIROHA_L2TP_MAX_HDR];
+	unsigned long last_seen;
+	bool foe_bound;
+	u32 foe_hash;
+};
+
 struct airoha_ppe {
 	struct airoha_ppe_dev dev;
 
@@ -729,6 +743,9 @@ struct airoha_ppe {
 	atomic64_t l2tp_kernel_sessions;
 	u32 l2tp_last_tunnel;
 	u32 l2tp_last_session;
+	struct airoha_l2tp_cache_entry l2tp_cache[AIROHA_L2TP_MAX_SESSIONS];
+	spinlock_t l2tp_lock;
+	struct delayed_work l2tp_aging_work;
 	struct airoha_eth *eth;
 
 	void *foe;

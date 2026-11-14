@@ -18,6 +18,7 @@
 #include <linux/if_pppox.h>
 #include <linux/udp.h>
 #include <net/pkt_cls.h>
+#include <linux/jiffies.h>
 #include <net/route.h>
 #if IS_ENABLED(CONFIG_L2TP)
 #include <net/l2tp_offload.h>
@@ -105,33 +106,114 @@ static bool airoha_ppe_l2tpv2_parse(const struct sk_buff *skb,
 }
 
 #if IS_ENABLED(CONFIG_L2TP)
+static struct airoha_l2tp_cache_entry *
+airoha_ppe_l2tp_lookup(struct airoha_ppe *ppe, u16 tunnel_id, u16 session_id)
+{
+	int i;
+
+	for (i = 0; i < AIROHA_L2TP_MAX_SESSIONS; i++) {
+		struct airoha_l2tp_cache_entry *entry = &ppe->l2tp_cache[i];
+
+		if (entry->valid && entry->tunnel_id == tunnel_id &&
+		    entry->session_id == session_id)
+			return entry;
+	}
+
+	return NULL;
+}
+
 static int airoha_ppe_l2tp_notify(struct notifier_block *nb,
 				  unsigned long action, void *data)
 {
 	struct airoha_eth *eth = container_of(nb, struct airoha_eth, l2tp_nb);
+	struct airoha_ppe *ppe = eth->ppe;
 	struct l2tp_offload_event *event = data;
+	struct airoha_l2tp_cache_entry *entry;
+	unsigned long flags;
+	int i;
 
-	if (!eth->ppe || !event)
+	if (!ppe || !event)
 		return NOTIFY_DONE;
 
-	atomic64_inc(&eth->ppe->l2tp_kernel_events);
+	atomic64_inc(&ppe->l2tp_kernel_events);
+	spin_lock_irqsave(&ppe->l2tp_lock, flags);
+
 	switch (event->type) {
 	case L2TP_OFFLOAD_SESSION_CREATED:
-		atomic64_inc(&eth->ppe->l2tp_kernel_sessions);
-		WRITE_ONCE(eth->ppe->l2tp_last_tunnel, event->tunnel_id);
-		WRITE_ONCE(eth->ppe->l2tp_last_session, event->session_id);
+		entry = airoha_ppe_l2tp_lookup(ppe, event->tunnel_id,
+					       event->session_id);
+		if (!entry) {
+			for (i = 0; i < AIROHA_L2TP_MAX_SESSIONS; i++) {
+				if (!ppe->l2tp_cache[i].valid) {
+					entry = &ppe->l2tp_cache[i];
+					break;
+				}
+			}
+		}
+		if (entry) {
+			entry->valid = true;
+			entry->foe_bound = false;
+			entry->tunnel_id = event->tunnel_id;
+			entry->session_id = event->session_id;
+			entry->last_seen = jiffies;
+			atomic64_inc(&ppe->l2tp_kernel_sessions);
+		}
+		WRITE_ONCE(ppe->l2tp_last_tunnel, event->tunnel_id);
+		WRITE_ONCE(ppe->l2tp_last_session, event->session_id);
 		break;
 	case L2TP_OFFLOAD_SESSION_DELETED:
-		if (atomic64_read(&eth->ppe->l2tp_kernel_sessions))
-			atomic64_dec(&eth->ppe->l2tp_kernel_sessions);
+		entry = airoha_ppe_l2tp_lookup(ppe, event->tunnel_id,
+					       event->session_id);
+		if (entry) {
+			entry->valid = false;
+			entry->foe_bound = false;
+			if (atomic64_read(&ppe->l2tp_kernel_sessions))
+				atomic64_dec(&ppe->l2tp_kernel_sessions);
+		}
 		break;
 	case L2TP_OFFLOAD_TX:
+		entry = airoha_ppe_l2tp_lookup(ppe, event->tunnel_id,
+					       event->session_id);
+		if (entry) {
+			entry->hdr_len = min_t(unsigned int, event->hdr_len,
+					       AIROHA_L2TP_MAX_HDR);
+			if (event->hdr && entry->hdr_len)
+				memcpy(entry->hdr, event->hdr, entry->hdr_len);
+			entry->foe_bound = true;
+			entry->last_seen = jiffies;
+		}
 		break;
 	default:
+		spin_unlock_irqrestore(&ppe->l2tp_lock, flags);
 		return NOTIFY_DONE;
 	}
 
+	spin_unlock_irqrestore(&ppe->l2tp_lock, flags);
 	return NOTIFY_OK;
+}
+
+static void airoha_ppe_l2tp_aging_work(struct work_struct *work)
+{
+	struct airoha_ppe *ppe = container_of(to_delayed_work(work),
+					      struct airoha_ppe, l2tp_aging_work);
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&ppe->l2tp_lock, flags);
+	for (i = 0; i < AIROHA_L2TP_MAX_SESSIONS; i++) {
+		struct airoha_l2tp_cache_entry *entry = &ppe->l2tp_cache[i];
+
+		if (entry->valid &&
+		    time_after(jiffies, entry->last_seen + 5 * HZ)) {
+			entry->valid = false;
+			entry->foe_bound = false;
+			if (atomic64_read(&ppe->l2tp_kernel_sessions))
+				atomic64_dec(&ppe->l2tp_kernel_sessions);
+		}
+	}
+	spin_unlock_irqrestore(&ppe->l2tp_lock, flags);
+
+	schedule_delayed_work(&ppe->l2tp_aging_work, 60 * HZ);
 }
 #endif
 
@@ -2414,6 +2496,9 @@ int airoha_ppe_init(struct airoha_eth *eth)
 	if (err)
 		goto error_flow_table_destroy;
 
+	spin_lock_init(&ppe->l2tp_lock);
+	INIT_DELAYED_WORK(&ppe->l2tp_aging_work, airoha_ppe_l2tp_aging_work);
+
 	err = airoha_ppe_debugfs_init(ppe);
 	if (err)
 		goto error_l2_flow_table_destroy;
@@ -2422,6 +2507,8 @@ int airoha_ppe_init(struct airoha_eth *eth)
 	eth->l2tp_nb.notifier_call = airoha_ppe_l2tp_notify;
 	if (l2tp_offload_register(&eth->l2tp_nb))
 		dev_warn(eth->dev, "failed to register L2TP offload consumer\n");
+	else
+		schedule_delayed_work(&ppe->l2tp_aging_work, 60 * HZ);
 #endif
 
 	return 0;
@@ -2439,6 +2526,7 @@ void airoha_ppe_deinit(struct airoha_eth *eth)
 	struct airoha_npu *npu;
 
 #if IS_ENABLED(CONFIG_L2TP)
+	cancel_delayed_work_sync(&eth->ppe->l2tp_aging_work);
 	l2tp_offload_unregister(&eth->l2tp_nb);
 #endif
 
