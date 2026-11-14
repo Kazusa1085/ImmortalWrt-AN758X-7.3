@@ -4,6 +4,29 @@ uci -q set asterisk.general.enabled='1'
 uci -q set asterisk.general.interface=''
 uci -q commit asterisk
 
+# Apply the voice-profile DSP switches to the kernel modules.  Both knobs
+# already exist in en75xx_pcm; this is the missing boot-time glue.
+apply_dsp_param() {
+	local param="$1" value="$2"
+
+	[ -n "$value" ] || return 0
+	[ -w "/sys/module/en75xx_pcm/parameters/$param" ] || return 0
+	printf '%s\n' "$value" > "/sys/module/en75xx_pcm/parameters/$param"
+}
+
+country=$(uci -q get onu-voice.config.country)
+[ -n "$country" ] || country=cn
+ec=$(uci -q get onu-voice.config.echo_cancellation)
+[ -n "$ec" ] || ec=1
+agc=$(uci -q get onu-voice.config.agc)
+[ -n "$agc" ] || agc=0
+
+apply_dsp_param lec_enable "$ec"
+apply_dsp_param alc_enable "$agc"
+bypass=$(uci -q get onu-voice.config.lec_bypass)
+[ -n "$bypass" ] || bypass=0
+apply_dsp_param lec_bypass "$bypass"
+
 indications=/etc/asterisk/indications.conf
 if [ -f "$indications" ]; then
 	cn_include='#include "indications-en75xx.conf"'
@@ -11,9 +34,9 @@ if [ -f "$indications" ]; then
 		printf '\n%s\n' "$cn_include" >> "$indications"
 	fi
 	if grep -q '^[[:space:]]*country=' "$indications"; then
-		sed -i 's/^[[:space:]]*country=.*/country=cn\t\t; default location/' "$indications"
+		sed -i "s/^[[:space:]]*country=.*/country=$country\t\t; selected voice region/" "$indications"
 	else
-		printf '\ncountry=cn\t\t; default location\n' >> "$indications"
+		printf '\ncountry=%s\t\t; selected voice region\n' "$country" >> "$indications"
 	fi
 fi
 
@@ -22,6 +45,14 @@ if [ -f "$musiconhold" ]; then
 	moh_include='#include "musiconhold-en75xx.conf"'
 	if ! grep -qxF "$moh_include" "$musiconhold"; then
 		printf '\n%s\n' "$moh_include" >> "$musiconhold"
+	fi
+fi
+
+features=/etc/asterisk/features.conf
+if [ -f "$features" ]; then
+	feature_include='#include "features-en75xx.conf"'
+	if ! grep -qxF "$feature_include" "$features"; then
+		printf '\n%s\n' "$feature_include" >> "$features"
 	fi
 fi
 
