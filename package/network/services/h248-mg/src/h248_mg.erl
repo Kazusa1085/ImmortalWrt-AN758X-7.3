@@ -3,7 +3,7 @@
 %% Protocol stack: Erlang/OTP megaco.  The C port owns /dev/en75xx-fxs0.
 -module(h248_mg).
 -behaviour(megaco_user).
--export([start/0, stop/0, port_loop/1, fxs_cmd/1, dtmf_event/1]).
+-export([start/0, stop/0, port_loop/1, fxs_cmd/1, dtmf_event/1, hook_event/1]).
 -export([handle_connect/2, handle_disconnect/3,
          handle_syntax_error/3, handle_message_error/3,
          handle_trans_request/3, handle_trans_long_request/3,
@@ -92,6 +92,8 @@ port_loop(Port) ->
         {Port, {data, Line}} ->
             case Line of
                 <<"PCM ", _/binary>> -> h248_media:handle_pcm(Line);
+                <<"EVENT hook=", H/binary>> ->
+                    hook_event(binary_to_integer(strip_nl(H)));
                 _ -> io:format("h248_mg: fxs ~s", [Line])
             end,
             port_loop(Port);
@@ -104,13 +106,27 @@ port_loop(Port) ->
 
 dtmf_event(Digit) ->
     io:format("h248_mg: DTMF ~c~n", [Digit]),
+    Params = [#'EventParameter'{eventParameterName = "digit",
+                                  value = [Digit]}],
+    send_event({packageName, "D"}, Params).
+
+hook_event(Hook) ->
+    io:format("h248_mg: hook ~p~n", [Hook]),
+    EventName = {packageName, "al"},
+    Params = [#'EventParameter'{eventParameterName = "hook",
+                                  value = integer_to_list(Hook)}],
+    send_event(EventName, Params).
+
+strip_nl(B) ->
+    binary:replace(binary:replace(B, <<"\r">>, <<>>), <<"\n">>, <<>>).
+
+send_event(EventName, Params) ->
     case {ets:lookup(h248_terms, conn), ets:match_object(h248_terms, {{term, '_'}, media, '_', '_', '_', '_'})} of
         {[{conn, ConnHandle}], [{TermKey, media, _Pid, _Ip, _Port, ContextId} | _]} ->
             {term, TID} = TermKey,
             Event = #'ObservedEvent'{
-                eventName = {packageName, "D"},
-                eventParList = [#'EventParameter'{eventParameterName = "digit",
-                                                  value = [Digit]}]},
+                eventName = EventName,
+                eventParList = Params},
             Notify = #'NotifyRequest'{
                 terminationID = [TID],
                 observedEventsDescriptor = #'ObservedEventsDescriptor'{
@@ -121,7 +137,7 @@ dtmf_event(Digit) ->
             catch megaco:cast(ConnHandle, [AR], []),
             ok;
         _ ->
-            io:format("h248_mg: no termination for DTMF~n"),
+            io:format("h248_mg: no termination for event~n"),
             ok
     end.
 
