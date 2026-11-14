@@ -548,6 +548,12 @@ struct airoha_flow_data {
 		u8 hdr_len;
 		u8 num;
 	} l2tp;
+	struct {
+		u64 id;
+		u8 type;
+		u8 decap;
+		u8 num;
+	} tunnel;
 };
 
 enum airoha_flow_entry_type {

@@ -20,6 +20,7 @@
 #include <net/pkt_cls.h>
 #include <linux/jiffies.h>
 #include <net/route.h>
+#include <net/ip_tunnels.h>
 #if IS_ENABLED(CONFIG_L2TP)
 #include <net/l2tp_offload.h>
 #endif
@@ -759,7 +760,7 @@ static int airoha_ppe_foe_entry_prepare(struct airoha_eth *eth,
 	      FIELD_PREP(AIROHA_FOE_IB1_BIND_VLAN_LAYER, data->vlan.num) |
 	      FIELD_PREP(AIROHA_FOE_IB1_BIND_VPM, data->vlan.num) |
 	      FIELD_PREP(AIROHA_FOE_IB1_BIND_PPPOE, data->pppoe.num) |
-	      (data->l2tp.num ? AIROHA_FOE_IB1_BIND_TUNNEL_DECAP : 0) |
+	      (data->l2tp.num || data->tunnel.decap ? AIROHA_FOE_IB1_BIND_TUNNEL_DECAP : 0) |
 	      AIROHA_FOE_IB1_BIND_TTL;
 	hwe->ib1 = val;
 
@@ -2152,6 +2153,19 @@ static int airoha_ppe_flow_offload_replace(struct airoha_eth *eth,
 
 			data.pppoe.sid = act->pppoe.sid;
 			data.pppoe.num++;
+			break;
+		case FLOW_ACTION_TUNNEL_ENCAP:
+		case FLOW_ACTION_TUNNEL_DECAP:
+			if (data.tunnel.num)
+				return -EOPNOTSUPP;
+
+			data.tunnel.type = act->id == FLOW_ACTION_TUNNEL_ENCAP ?
+					   AIROHA_TUNNEL_GRE : AIROHA_TUNNEL_VXLAN;
+			data.tunnel.decap =
+				act->id == FLOW_ACTION_TUNNEL_DECAP;
+			data.tunnel.id = act->tunnel ?
+					be64_to_cpu(act->tunnel->key.tun_id) & 0xffffffff : 0;
+			data.tunnel.num = 1;
 			break;
 		default:
 			return -EOPNOTSUPP;
