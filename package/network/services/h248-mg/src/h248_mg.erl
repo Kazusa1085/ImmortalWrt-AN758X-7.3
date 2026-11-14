@@ -80,6 +80,13 @@ stop() ->
     ok.
 
 start_fxs_port() ->
+    case os:getenv("H248_NO_FXS") of
+        "1" -> ok;
+        _ ->
+            start_fxs_port_real()
+    end.
+
+start_fxs_port_real() ->
     Device = os:getenv("H248_DEVICE", "/dev/en75xx-fxs0"),
     Port = open_port({spawn, "/usr/bin/en75xx_fxs_port"}, [binary, {packet, line}]),
     port_command(Port, "OPEN " ++ Device ++ "\n"),
@@ -147,7 +154,7 @@ fxs_cmd(Cmd) ->
         Pid -> Pid ! {cmd, Cmd}, ok
     end.
 
-handle_connect(_Handle, _Info) -> {ok, []}.
+handle_connect(_Handle, _Info) -> ok.
 handle_disconnect(_Handle, _Reason, _Info) -> ok.
 handle_syntax_error(_Handle, _Error, _Info) -> ok.
 handle_message_error(_Handle, _Error, _Info) -> ok.
