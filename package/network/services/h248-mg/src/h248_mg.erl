@@ -50,6 +50,7 @@ start_transport(Mid, Mgc, MgcPort, LocalPort) ->
                                         SendHandle, ControlPid) of
                         {ok, ConnHandle} ->
                             io:format("h248_mg: connected~n"),
+                            ets:insert(h248_terms, {conn, ConnHandle}),
                             service_change(ConnHandle);
                         Other ->
                             io:format("h248_mg: connect failed: ~p~n", [Other])
@@ -103,7 +104,26 @@ port_loop(Port) ->
 
 dtmf_event(Digit) ->
     io:format("h248_mg: DTMF ~c~n", [Digit]),
-    ok.
+    case {ets:lookup(h248_terms, conn), ets:match_object(h248_terms, {{term, '_'}, media, '_', '_', '_', '_'})} of
+        {[{conn, ConnHandle}], [{TermKey, media, _Pid, _Ip, _Port, ContextId} | _]} ->
+            {term, TID} = TermKey,
+            Event = #'ObservedEvent'{
+                eventName = {packageName, "D"},
+                eventParList = [#'EventParameter'{eventParameterName = "digit",
+                                                  value = [Digit]}]},
+            Notify = #'NotifyRequest'{
+                terminationID = [TID],
+                observedEventsDescriptor = #'ObservedEventsDescriptor'{
+                    requestId = 1,
+                    observedEventLst = [Event]}},
+            CR = #'CommandRequest'{command = {notifyReq, Notify}},
+            AR = #'ActionRequest'{contextId = ContextId, commandRequests = [CR]},
+            catch megaco:cast(ConnHandle, [AR], []),
+            ok;
+        _ ->
+            io:format("h248_mg: no termination for DTMF~n"),
+            ok
+    end.
 
 fxs_cmd(Cmd) ->
     case whereis(h248_fxs) of
@@ -128,7 +148,7 @@ handle_trans_request(ConnHandle, _Proto, [AR]) ->
                                      commandReply = [{serviceChangeReply, Rep}]}]};
                 {addReq, Amm} ->
                     fxs_cmd("RING ON"),
-                    add_rtp_termination(Amm),
+                    add_rtp_termination(ContextId, Amm),
                     amm_reply(ContextId, addReply, Amm);
                 {modifyReq, Amm} ->
                     fxs_cmd("LINEFEED 2"),
@@ -170,7 +190,7 @@ service_change_reply(ConnHandle, SCR) ->
                                                           errorText = "Only root supported"}}}
     end.
 
-add_rtp_termination(Amm) ->
+add_rtp_termination(ContextId, Amm) ->
     TID = Amm#'AmmRequest'.terminationID,
     case ets:lookup(h248_terms, {term, TID}) of
         [] ->
@@ -178,7 +198,7 @@ add_rtp_termination(Amm) ->
                 {ok, Ip, Port} ->
                     case h248_media:start(Ip, Port) of
                         {ok, Pid} ->
-                            ets:insert(h248_terms, {{term, TID}, media, Pid, Ip, Port});
+                            ets:insert(h248_terms, {{term, TID}, media, Pid, Ip, Port, ContextId});
                         Other ->
                             io:format("h248_mg: media open failed: ~p~n", [Other])
                     end;
