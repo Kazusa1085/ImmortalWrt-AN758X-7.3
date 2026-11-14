@@ -1,0 +1,43 @@
+diff --git a/asterisk/chan_en75xx.c b/asterisk/chan_en75xx.c
+index aafc5b2..75992ab 100644
+--- a/asterisk/chan_en75xx.c
++++ b/asterisk/chan_en75xx.c
+@@ -297,6 +297,17 @@ static void start_dialtone(struct en75xx_pvt *p, struct ast_channel *chan)
+  * during fax negotiation. Suspend it for the switch, restore it once
+  * there is a real conversation to level.
+  */
++static void line_set_lec_bypass(int enable)
++{
++	int fd = open("/sys/module/en75xx_pcm/parameters/lec_bypass", O_WRONLY);
++	char value = enable ? '1' : '0';
++
++	if (fd >= 0) {
++		(void)write(fd, &value, 1);
++		close(fd);
++	}
++}
++
+ static void line_set_alc(struct en75xx_pvt *p, int enable)
+ {
+ 	uint32_t val = !!enable;
+@@ -801,6 +812,7 @@ static int en75xx_hangup(struct ast_channel *ast)
+ 	/* an oscillator left running would sing on into the next call */
+ 	stop_dialtone(p, NULL);
+ 	line_set_alc(p, 1);
++	line_set_lec_bypass(0);
+ 	line_flush(p);
+ 
+ 	/*
+@@ -990,6 +1002,12 @@ static int en75xx_indicate(struct ast_channel *ast, int condition,
+ 	case AST_CONTROL_RINGING:
+ 		res = play_tone(ast, "ring");
+ 		break;
++	case AST_CONTROL_T38_PARAMETERS:
++		/* This FXS path is G.711 only; refuse T.38 and bypass OSLEC
++		 * while the fax/modem negotiation is in progress. */
++		line_set_lec_bypass(1);
++		res = AST_T38_REFUSED;
++		break;
+ 	case AST_CONTROL_PROGRESS:
+ 	case AST_CONTROL_PROCEEDING:
+ 	case AST_CONTROL_VIDUPDATE:
