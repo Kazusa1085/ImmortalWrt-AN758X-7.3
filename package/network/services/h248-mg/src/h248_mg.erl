@@ -15,7 +15,10 @@
 
 start() ->
     application:ensure_all_started(megaco),
+    ets:new(h248_terms, [named_table, public, set]),
     Mgc = os:getenv("H248_MGC", "127.0.0.1"),
+    RtpPort = list_to_integer(os:getenv("H248_RTP_PORT", "5004")),
+    ets:insert(h248_terms, {rtp_port, RtpPort}),
     MgcPort = list_to_integer(os:getenv("H248_MGC_PORT", "2944")),
     LocalPort = list_to_integer(os:getenv("H248_LOCAL_PORT", "2944")),
     Mid = {deviceName, "en75xx-mg"},
@@ -118,6 +121,7 @@ handle_trans_request(ConnHandle, _Proto, [AR]) ->
                                      commandReply = [{serviceChangeReply, Rep}]}]};
                 {addReq, Amm} ->
                     fxs_cmd("RING ON"),
+                    add_rtp_termination(Amm),
                     amm_reply(ContextId, addReply, Amm);
                 {modifyReq, Amm} ->
                     fxs_cmd("LINEFEED 2"),
@@ -125,6 +129,7 @@ handle_trans_request(ConnHandle, _Proto, [AR]) ->
                 {subtractReq, Amm} ->
                     fxs_cmd("RING OFF"),
                     fxs_cmd("LINEFEED 1"),
+                    del_rtp_termination(Amm),
                     amm_reply(ContextId, subtractReply, Amm);
                 _ ->
                     not_implemented(ContextId)
@@ -156,6 +161,29 @@ service_change_reply(ConnHandle, SCR) ->
                                       {errorDescriptor,
                                        #'ErrorDescriptor'{errorCode = ?megaco_not_implemented,
                                                           errorText = "Only root supported"}}}
+    end.
+
+add_rtp_termination(Amm) ->
+    TID = Amm#'AmmRequest'.terminationID,
+    case ets:lookup(h248_terms, {term, TID}) of
+        [] ->
+            [{rtp_port, Port}] = ets:lookup(h248_terms, rtp_port),
+            case h248_rtp:start(Port) of
+                {ok, Socket} ->
+                    ets:insert(h248_terms, {{term, TID}, Socket, Port});
+                Other ->
+                    io:format("h248_mg: rtp open failed: ~p~n", [Other])
+            end;
+        _ -> ok
+    end.
+
+del_rtp_termination(Amm) ->
+    TID = Amm#'AmmRequest'.terminationID,
+    case ets:lookup(h248_terms, {term, TID}) of
+        [{_, Socket, _}] ->
+            catch h248_rtp:stop(Socket),
+            ets:delete(h248_terms, {term, TID});
+        [] -> ok
     end.
 
 amm_reply(ContextId, Tag, Amm) ->
