@@ -263,6 +263,55 @@ static int airoha_ppe_l2tp_notify(struct notifier_block *nb,
 	return NOTIFY_OK;
 }
 
+static void airoha_ppe_tunnel_cache_update(struct airoha_ppe *ppe, u8 type,
+					       u32 id)
+{
+	struct airoha_tunnel_cache_entry *free_entry = NULL;
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&ppe->tunnel_lock, flags);
+	for (i = 0; i < AIROHA_TUNNEL_MAX_ENTRIES; i++) {
+		struct airoha_tunnel_cache_entry *entry = &ppe->tunnel_cache[i];
+
+		if (entry->valid && entry->type == type && entry->id == id) {
+			entry->last_seen = jiffies;
+			goto out;
+		}
+		if (!entry->valid && !free_entry)
+			free_entry = entry;
+	}
+	if (free_entry) {
+		free_entry->valid = true;
+		free_entry->type = type;
+		free_entry->id = id;
+		free_entry->last_seen = jiffies;
+	}
+out:
+	spin_unlock_irqrestore(&ppe->tunnel_lock, flags);
+}
+
+static void airoha_ppe_tunnel_aging_work(struct work_struct *work)
+{
+	struct airoha_ppe *ppe = container_of(to_delayed_work(work),
+					      struct airoha_ppe,
+					      tunnel_aging_work);
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&ppe->tunnel_lock, flags);
+	for (i = 0; i < AIROHA_TUNNEL_MAX_ENTRIES; i++) {
+		struct airoha_tunnel_cache_entry *entry = &ppe->tunnel_cache[i];
+
+		if (entry->valid &&
+		    time_after(jiffies, entry->last_seen + 300 * HZ))
+			entry->valid = false;
+	}
+	spin_unlock_irqrestore(&ppe->tunnel_lock, flags);
+
+	schedule_delayed_work(&ppe->tunnel_aging_work, 60 * HZ);
+}
+
 static void airoha_ppe_l2tp_aging_work(struct work_struct *work)
 {
 	struct airoha_ppe *ppe = container_of(to_delayed_work(work),
@@ -1777,10 +1826,15 @@ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
 	atomic64_inc(&ppe->gre_seen);
 	atomic64_inc(&ppe->vxlan_seen);
 	atomic64_inc(&ppe->l2tp_seen);
-	if (airoha_ppe_vxlan_parse(skb, &vxlan_vni))
+	if (airoha_ppe_vxlan_parse(skb, &vxlan_vni)) {
 		atomic64_inc(&ppe->vxlan_candidates);
-	if (airoha_ppe_gre_parse(skb, &gre_key))
+		airoha_ppe_tunnel_cache_update(ppe, AIROHA_TUNNEL_VXLAN,
+					       vxlan_vni);
+	}
+	if (airoha_ppe_gre_parse(skb, &gre_key)) {
 		atomic64_inc(&ppe->gre_candidates);
+		airoha_ppe_tunnel_cache_update(ppe, AIROHA_TUNNEL_GRE, gre_key);
+	}
 	if (airoha_ppe_l2tpv2_parse(skb, &l2tp_tunnel, &l2tp_session,
 				     &l2tp_hdr_len))
 		atomic64_inc(&ppe->l2tp_candidates);
@@ -2584,7 +2638,9 @@ int airoha_ppe_init(struct airoha_eth *eth)
 		goto error_flow_table_destroy;
 
 	spin_lock_init(&ppe->l2tp_lock);
+	spin_lock_init(&ppe->tunnel_lock);
 	INIT_DELAYED_WORK(&ppe->l2tp_aging_work, airoha_ppe_l2tp_aging_work);
+	INIT_DELAYED_WORK(&ppe->tunnel_aging_work, airoha_ppe_tunnel_aging_work);
 
 	err = airoha_ppe_debugfs_init(ppe);
 	if (err)
@@ -2594,8 +2650,10 @@ int airoha_ppe_init(struct airoha_eth *eth)
 	eth->l2tp_nb.notifier_call = airoha_ppe_l2tp_notify;
 	if (l2tp_offload_register(&eth->l2tp_nb))
 		dev_warn(eth->dev, "failed to register L2TP offload consumer\n");
-	else
+	else {
 		schedule_delayed_work(&ppe->l2tp_aging_work, 60 * HZ);
+		schedule_delayed_work(&ppe->tunnel_aging_work, 60 * HZ);
+	}
 #endif
 
 	return 0;
@@ -2614,6 +2672,7 @@ void airoha_ppe_deinit(struct airoha_eth *eth)
 
 #if IS_ENABLED(CONFIG_L2TP)
 	cancel_delayed_work_sync(&eth->ppe->l2tp_aging_work);
+	cancel_delayed_work_sync(&eth->ppe->tunnel_aging_work);
 	l2tp_offload_unregister(&eth->l2tp_nb);
 #endif
 

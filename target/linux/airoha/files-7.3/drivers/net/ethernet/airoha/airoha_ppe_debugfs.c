@@ -242,6 +242,29 @@ static int airoha_ppe_debugfs_stats_show(struct seq_file *m, void *private)
 }
 DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_stats);
 
+static int airoha_ppe_debugfs_tunnels_show(struct seq_file *m, void *private)
+{
+	struct airoha_ppe *ppe = m->private;
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&ppe->tunnel_lock, flags);
+	for (i = 0; i < AIROHA_TUNNEL_MAX_ENTRIES; i++) {
+		struct airoha_tunnel_cache_entry *entry = &ppe->tunnel_cache[i];
+
+		if (!entry->valid)
+			continue;
+		seq_printf(m, "%s id=%u age=%lu jiffies\n",
+			   entry->type == AIROHA_TUNNEL_GRE ? "gre" : "vxlan",
+			   entry->id, jiffies - entry->last_seen);
+	}
+	spin_unlock_irqrestore(&ppe->tunnel_lock, flags);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_tunnels);
+
+
+
 #if IS_ENABLED(CONFIG_L2TP)
 static int airoha_ppe_debugfs_l2tp_show(struct seq_file *m, void *private)
 {
@@ -282,6 +305,8 @@ int airoha_ppe_debugfs_init(struct airoha_ppe *ppe)
 	debugfs_create_file("l2tp", 0444, ppe->debugfs_dir, ppe,
 			    &airoha_ppe_debugfs_l2tp_fops);
 #endif
+	debugfs_create_file("tunnels", 0444, ppe->debugfs_dir, ppe,
+			    &airoha_ppe_debugfs_tunnels_fops);
 
 	return 0;
 }
