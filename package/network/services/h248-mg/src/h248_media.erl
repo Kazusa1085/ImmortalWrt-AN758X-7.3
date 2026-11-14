@@ -38,6 +38,10 @@ loop(Socket, Ip, Port, Seq, Ts) ->
             loop(Socket, Ip, Port, Seq, Ts);
         {pcm, Hex} ->
             Pcm = hex_to_samples(Hex),
+            case h248_dtmf:detect(Pcm) of
+                none -> ok;
+                Digit -> h248_mg:dtmf_event(Digit)
+            end,
             Payload = h248_g711:encode(pcmu, Pcm),
             Hdr = <<2:2, 0:1, 0:1, 0:4, 0:8, Seq:16, Ts:32, 1:32>>,
             h248_rtp:send(Socket, Ip, Port, <<Hdr/binary, Payload/binary>>),

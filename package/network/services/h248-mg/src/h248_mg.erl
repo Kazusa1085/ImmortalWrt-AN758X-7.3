@@ -3,7 +3,7 @@
 %% Protocol stack: Erlang/OTP megaco.  The C port owns /dev/en75xx-fxs0.
 -module(h248_mg).
 -behaviour(megaco_user).
--export([start/0, stop/0, port_loop/1, fxs_cmd/1]).
+-export([start/0, stop/0, port_loop/1, fxs_cmd/1, dtmf_event/1]).
 -export([handle_connect/2, handle_disconnect/3,
          handle_syntax_error/3, handle_message_error/3,
          handle_trans_request/3, handle_trans_long_request/3,
@@ -100,6 +100,10 @@ port_loop(Port) ->
         {Port, closed} -> ok;
         _ -> port_loop(Port)
     end.
+
+dtmf_event(Digit) ->
+    io:format("h248_mg: DTMF ~c~n", [Digit]),
+    ok.
 
 fxs_cmd(Cmd) ->
     case whereis(h248_fxs) of
