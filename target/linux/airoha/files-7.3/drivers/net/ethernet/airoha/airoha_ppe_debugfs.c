@@ -5,6 +5,8 @@
  */
 
 #include "airoha_regs.h"
+#include <linux/uaccess.h>
+
 #include "airoha_eth.h"
 
 static void airoha_debugfs_ppe_print_tuple(struct seq_file *m,
@@ -266,6 +268,53 @@ static int airoha_ppe_debugfs_tunnels_show(struct seq_file *m, void *private)
 }
 DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_tunnels);
 
+static int airoha_ppe_debugfs_tunnel_selftest_show(struct seq_file *m,
+							void *private)
+{
+	struct airoha_ppe *ppe = m->private;
+
+	seq_printf(m, "tunnel selftest ok=%llu\n", ppe->tunnel_selftest_ok);
+	return 0;
+}
+
+static ssize_t
+airoha_ppe_debugfs_tunnel_selftest_write(struct file *file,
+					 const char __user *user_buf,
+					 size_t count, loff_t *ppos)
+{
+	struct seq_file *m = file->private_data;
+	struct airoha_ppe *ppe = m->private;
+	char buf[32];
+	int err;
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+	buf[count] = '\0';
+	strim(buf);
+	err = airoha_ppe_tunnel_selftest(ppe, buf);
+	return err ? err : count;
+}
+
+static int airoha_ppe_debugfs_tunnel_selftest_open(struct inode *inode,
+						    struct file *file)
+{
+	return single_open(file, airoha_ppe_debugfs_tunnel_selftest_show,
+			   inode->i_private);
+}
+
+static const struct file_operations airoha_ppe_debugfs_tunnel_selftest_fops = {
+	.owner = THIS_MODULE,
+	.open = airoha_ppe_debugfs_tunnel_selftest_open,
+	.read = seq_read,
+	.write = airoha_ppe_debugfs_tunnel_selftest_write,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+
+
 
 
 #if IS_ENABLED(CONFIG_L2TP)
@@ -310,6 +359,8 @@ int airoha_ppe_debugfs_init(struct airoha_ppe *ppe)
 #endif
 	debugfs_create_file("tunnels", 0444, ppe->debugfs_dir, ppe,
 			    &airoha_ppe_debugfs_tunnels_fops);
+	debugfs_create_file("tunnel_selftest", 0644, ppe->debugfs_dir, ppe,
+			    &airoha_ppe_debugfs_tunnel_selftest_fops);
 
 	return 0;
 }

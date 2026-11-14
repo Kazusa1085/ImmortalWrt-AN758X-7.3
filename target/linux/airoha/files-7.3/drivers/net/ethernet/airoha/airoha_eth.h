@@ -786,6 +786,7 @@ struct airoha_ppe {
 	atomic64_t gre_candidates;
 	atomic64_t vxlan_seen;
 	atomic64_t vxlan_candidates;
+	u64 tunnel_selftest_ok;
 	atomic64_t l2tp_kernel_events;
 	atomic64_t l2tp_kernel_sessions;
 	u32 l2tp_last_tunnel;
@@ -811,6 +812,8 @@ struct airoha_ppe {
 
 	struct dentry *debugfs_dir;
 };
+
+int airoha_ppe_tunnel_selftest(struct airoha_ppe *ppe, const char *buf);
 
 struct airoha_eth_soc_data {
 	u16 version;

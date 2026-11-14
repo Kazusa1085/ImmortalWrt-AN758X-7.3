@@ -276,6 +276,60 @@ static int airoha_ppe_l2tp_notify(struct notifier_block *nb,
 	return NOTIFY_OK;
 }
 
+/* Build the software template for a future PPE tunnel entry.  This does
+ * not write hardware: the register-level FOE fields still require a board
+ * validated layout.  It keeps the direction/key handling in one place and
+ * gives the local selftest a concrete structure to exercise.
+ */
+static void
+airoha_ppe_tunnel_prepare_foe(const struct airoha_tunnel_meta *meta,
+			      struct airoha_foe_entry *hwe)
+{
+	memset(hwe, 0, sizeof(*hwe));
+	hwe->ib1 = FIELD_PREP(AIROHA_FOE_IB1_BIND_STATE,
+			      AIROHA_FOE_STATE_BIND) |
+		   FIELD_PREP(AIROHA_FOE_IB1_BIND_PACKET_TYPE,
+			      PPE_PKT_TYPE_IPV4_HNAPT) |
+		   (meta->decap ? AIROHA_FOE_IB1_BIND_TUNNEL_DECAP : 0) |
+		   AIROHA_FOE_IB1_BIND_TTL;
+}
+
+static void airoha_ppe_tunnel_cache_update(struct airoha_ppe *ppe,
+					       const struct airoha_tunnel_meta *meta);
+
+int airoha_ppe_tunnel_selftest(struct airoha_ppe *ppe, const char *buf)
+{
+	struct airoha_tunnel_meta meta = {};
+	struct airoha_foe_entry hwe;
+	char kind[8];
+	unsigned int id;
+	u8 type;
+
+	if (!ppe || sscanf(buf, "%7s %u", kind, &id) != 2)
+		return -EINVAL;
+
+	if (!strcmp(kind, "gre"))
+		type = AIROHA_TUNNEL_GRE;
+	else if (!strcmp(kind, "vxlan"))
+		type = AIROHA_TUNNEL_VXLAN;
+	else
+		return -EINVAL;
+
+	meta.type = type;
+	meta.id = id;
+	meta.decap = true;
+	meta.inner_proto = 0;
+	meta.src = htonl(0x0a000001);
+	meta.dst = htonl(0x0a000002);
+	meta.sport = htons(type == AIROHA_TUNNEL_VXLAN ? 40000 : 0);
+	meta.dport = htons(type == AIROHA_TUNNEL_VXLAN ? AIROHA_VXLAN_PORT : 0);
+
+	airoha_ppe_tunnel_cache_update(ppe, &meta);
+	airoha_ppe_tunnel_prepare_foe(&meta, &hwe);
+	ppe->tunnel_selftest_ok++;
+	return 0;
+}
+
 static void airoha_ppe_tunnel_cache_update(struct airoha_ppe *ppe,
 					       const struct airoha_tunnel_meta *meta)
 {
