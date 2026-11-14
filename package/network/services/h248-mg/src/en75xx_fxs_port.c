@@ -102,6 +102,65 @@ static int cmd_linefeed(const char *value)
 	return 0;
 }
 
+static int hexval(int c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+static int cmd_pcm_read(void)
+{
+	unsigned char buf[160];
+	ssize_t n;
+	int i;
+
+	if (fd < 0)
+		return -1;
+	n = read(fd, buf, sizeof(buf));
+	if (n < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			printf("PCM NONE\n");
+			fflush(stdout);
+			return 0;
+		}
+		printf("ERR pcm-read: %s\n", strerror(errno));
+		fflush(stdout);
+		return -1;
+	}
+	printf("PCM ");
+	for (i = 0; i < n; i++)
+		printf("%02x", buf[i]);
+	printf("\n");
+	fflush(stdout);
+	return 0;
+}
+
+static int cmd_pcm_write(const char *hex)
+{
+	unsigned char buf[160];
+	size_t len = strlen(hex), i;
+	ssize_t n;
+
+	if (fd < 0 || len % 2 || len / 2 > sizeof(buf))
+		return -1;
+	for (i = 0; i < len; i += 2) {
+		int hi = hexval(hex[i]), lo = hexval(hex[i + 1]);
+		if (hi < 0 || lo < 0)
+			return -1;
+		buf[i / 2] = (hi << 4) | lo;
+	}
+	n = write(fd, buf, len / 2);
+	if (n < 0) {
+		printf("ERR pcm-write: %s\n", strerror(errno));
+		fflush(stdout);
+		return -1;
+	}
+	reply_ok("pcm-write");
+	return 0;
+}
+
 int main(void)
 {
 	char line[256];
@@ -128,6 +187,10 @@ int main(void)
 			cmd_ring(1);
 		else if (!strcmp(line, "RING OFF"))
 			cmd_ring(0);
+		else if (!strcmp(line, "PCM READ"))
+			cmd_pcm_read();
+		else if (!strncmp(line, "PCM WRITE ", 10))
+			cmd_pcm_write(line + 10);
 		else if (!strcmp(line, "PING"))
 			reply_ok("pong");
 		else if (!strcmp(line, "QUIT"))
