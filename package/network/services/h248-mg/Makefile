@@ -5,6 +5,7 @@ PKG_NAME:=h248-mg
 PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0 GPL-2.0-only
 ERLC:=$(STAGING_DIR_HOSTPKG)/lib/erlang/bin/erlc
+MEGACO_INCLUDE:=$(wildcard $(STAGING_DIR_HOSTPKG)/lib/erlang/lib/megaco-*/include)
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -27,8 +28,8 @@ endef
 
 define Build/Compile
 	mkdir -p $(PKG_BUILD_DIR)/ebin
-	$(ERLC) -o $(PKG_BUILD_DIR)/ebin \
-		$(CURDIR)/src/h248_mg.erl
+	$(ERLC) -o $(PKG_BUILD_DIR)/ebin -I$(MEGACO_INCLUDE) \
+		$(CURDIR)/src/h248_mg.erl $(CURDIR)/src/megaco_simple_mg.erl
 	$(TARGET_CC) $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) \
 		-Wall -Wextra -Werror -I$(CURDIR)/src \
 		-o $(PKG_BUILD_DIR)/en75xx_fxs_port \
@@ -39,7 +40,7 @@ define Package/h248-mg/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/en75xx_fxs_port $(1)/usr/bin/
 	$(INSTALL_DIR) $(1)/usr/lib/erlang/lib/h248_mg-0.1/ebin
-	$(INSTALL_DATA) $(PKG_BUILD_DIR)/ebin/h248_mg.beam $(1)/usr/lib/erlang/lib/h248_mg-0.1/ebin/
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/ebin/h248_mg.beam $(PKG_BUILD_DIR)/ebin/megaco_simple_mg.beam $(1)/usr/lib/erlang/lib/h248_mg-0.1/ebin/
 	$(INSTALL_DATA) $(CURDIR)/src/h248_mg.app $(1)/usr/lib/erlang/lib/h248_mg-0.1/ebin/
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(CURDIR)/files/h248-mg.init $(1)/etc/init.d/h248-mg

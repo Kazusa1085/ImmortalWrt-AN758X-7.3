@@ -15,7 +15,7 @@ start_service() {
 	procd_open_instance
 	procd_set_param command /usr/bin/erl -noshell \
 		-pa /usr/lib/erlang/lib/h248_mg-0.1/ebin \
-		-eval 'h248_mg:start(), timer:sleep(infinity).'
+		-eval 'megaco_simple_mg:start(os:getenv("H248_MGC", "127.0.0.1"), false, false), timer:sleep(infinity).'
 	procd_set_param env H248_MGC="$mgc" H248_MGC_PORT="$port" H248_DEVICE="$device"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 0
