@@ -1,7 +1,6 @@
-%% Minimal H.248/Megaco media-gateway skeleton.
+%% Minimal H.248/Megaco MG.
 %%
-%% The protocol stack is Erlang/OTP megaco.  The callbacks are deliberately
-%% small: transport and FXS port integration are layered on top.
+%% Protocol stack: Erlang/OTP megaco.  The C port owns /dev/en75xx-fxs0.
 -module(h248_mg).
 -behaviour(megaco_user).
 -export([start/0, stop/0, port_loop/1]).
@@ -11,24 +10,65 @@
          handle_trans_reply/4, handle_trans_ack/4,
          handle_unexpected_trans/3, handle_trans_request_abort/4]).
 
+-include_lib("megaco/include/megaco.hrl").
+-include_lib("megaco/include/megaco_message_v1.hrl").
+
 start() ->
+    application:ensure_all_started(megaco),
     Mgc = os:getenv("H248_MGC", "127.0.0.1"),
-    Port = list_to_integer(os:getenv("H248_MGC_PORT", "2944")),
+    MgcPort = list_to_integer(os:getenv("H248_MGC_PORT", "2944")),
+    LocalPort = list_to_integer(os:getenv("H248_LOCAL_PORT", "2944")),
     Mid = {deviceName, "en75xx-mg"},
     Config = [{user_mod, h248_mg},
               {encoding_mod, megaco_pretty_text_encoder},
               {encoding_config, []},
               {send_mod, megaco_udp}],
-    io:format("h248_mg: MGC=~s:~p~n", [Mgc, Port]),
-    application:ensure_all_started(megaco),
     case megaco:start_user(Mid, Config) of
         ok ->
-            io:format("h248_mg: megaco user started~n"),
+            io:format("h248_mg: user started, MGC ~s:~p local ~p~n",
+                      [Mgc, MgcPort, LocalPort]),
+            start_transport(Mid, Mgc, MgcPort, LocalPort),
             start_fxs_port(),
             ok;
         Error ->
             io:format("h248_mg: start_user failed: ~p~n", [Error]),
             Error
+    end.
+
+start_transport(Mid, Mgc, MgcPort, LocalPort) ->
+    RecHandle = megaco:user_info(Mid, receive_handle),
+    case megaco_udp:start_transport() of
+        {ok, SupPid} ->
+            case megaco_udp:open(SupPid, [{port, LocalPort},
+                                          {receive_handle, RecHandle}]) of
+                {ok, Handle, ControlPid} ->
+                    SendHandle = megaco_udp:create_send_handle(Handle, Mgc, MgcPort),
+                    case megaco:connect(RecHandle, preliminary_mid,
+                                        SendHandle, ControlPid) of
+                        {ok, ConnHandle} ->
+                            io:format("h248_mg: connected~n"),
+                            service_change(ConnHandle);
+                        Other ->
+                            io:format("h248_mg: connect failed: ~p~n", [Other])
+                    end;
+                Other ->
+                    io:format("h248_mg: udp open failed: ~p~n", [Other])
+            end;
+        Other ->
+            io:format("h248_mg: udp transport failed: ~p~n", [Other])
+    end.
+
+service_change(ConnHandle) ->
+    SCP = #'ServiceChangeParm'{serviceChangeMethod = restart,
+                               serviceChangeReason = [?megaco_cold_boot]},
+    SCR = #'ServiceChangeRequest'{terminationID = [?megaco_root_termination_id],
+                                  serviceChangeParms = SCP},
+    CR = #'CommandRequest'{command = {serviceChangeReq, SCR}},
+    AR = #'ActionRequest'{contextId = ?megaco_null_context_id,
+                          commandRequests = [CR]},
+    case megaco:call(ConnHandle, [AR], []) of
+        {ok, _Reply} -> io:format("h248_mg: service change ok~n");
+        Other -> io:format("h248_mg: service change reply: ~p~n", [Other])
     end.
 
 stop() ->
@@ -46,18 +86,66 @@ port_loop(Port) ->
         {Port, {data, Line}} ->
             io:format("h248_mg: fxs ~s", [Line]),
             port_loop(Port);
-        {Port, closed} ->
-            ok;
-        _Other ->
-            port_loop(Port)
+        {Port, closed} -> ok;
+        _ -> port_loop(Port)
     end.
 
 handle_connect(_Handle, _Info) -> {ok, []}.
 handle_disconnect(_Handle, _Reason, _Info) -> ok.
 handle_syntax_error(_Handle, _Error, _Info) -> ok.
 handle_message_error(_Handle, _Error, _Info) -> ok.
-handle_trans_request(_Handle, _Request, _Res) -> {error, 1}.
-handle_trans_long_request(_Handle, _Request, _Res) -> {error, 1}.
+
+handle_trans_request(ConnHandle, _Proto, [AR]) ->
+    ContextId = AR#'ActionRequest'.contextId,
+    case AR#'ActionRequest'.commandRequests of
+        [CR] ->
+            case CR#'CommandRequest'.command of
+                {serviceChangeReq, Req} ->
+                    Rep = service_change_reply(ConnHandle, Req),
+                    {discard_ack,
+                     [#'ActionReply'{contextId = ContextId,
+                                     commandReply = [{serviceChangeReply, Rep}]}]};
+                _ ->
+                    not_implemented(ContextId)
+            end;
+        _ -> not_implemented(ContextId)
+    end;
+handle_trans_request(_ConnHandle, _Proto, _Requests) ->
+    ED = #'ErrorDescriptor'{errorCode = ?megaco_not_implemented,
+                             errorText = "Only one action request is supported"},
+    {discard_ack, ED}.
+
+service_change_reply(ConnHandle, SCR) ->
+    TermId = SCR#'ServiceChangeRequest'.terminationID,
+    case TermId of
+        [?megaco_root_termination_id] ->
+            MyMid = ConnHandle#megaco_conn_handle.local_mid,
+            SCP = SCR#'ServiceChangeRequest'.serviceChangeParms,
+            Res = {serviceChangeResParms,
+                   #'ServiceChangeResParm'{serviceChangeMgcId = MyMid,
+                                           serviceChangeAddress =
+                                               SCP#'ServiceChangeParm'.serviceChangeAddress,
+                                           serviceChangeProfile =
+                                               SCP#'ServiceChangeParm'.serviceChangeProfile}},
+            #'ServiceChangeReply'{terminationID = TermId,
+                                  serviceChangeResult = Res};
+        _ ->
+            #'ServiceChangeReply'{terminationID = TermId,
+                                  serviceChangeResult =
+                                      {errorDescriptor,
+                                       #'ErrorDescriptor'{errorCode = ?megaco_not_implemented,
+                                                          errorText = "Only root supported"}}}
+    end.
+
+not_implemented(ContextId) ->
+    ED = #'ErrorDescriptor'{errorCode = ?megaco_not_implemented,
+                             errorText = "Termination mapping not implemented"},
+    {discard_ack, [#'ActionReply'{contextId = ContextId,
+                                 errorDescriptor = ED}]}.
+
+handle_trans_long_request(_Handle, _Proto, _Req) ->
+    {discard_ack, #'ErrorDescriptor'{errorCode = ?megaco_not_implemented,
+                                     errorText = "Long requests not implemented"}}.
 handle_trans_reply(_Handle, _Reply, _Res, _Info) -> ok.
 handle_trans_ack(_Handle, _Ack, _Res, _Info) -> ok.
 handle_unexpected_trans(_Handle, _Transaction, _Info) -> ok.
