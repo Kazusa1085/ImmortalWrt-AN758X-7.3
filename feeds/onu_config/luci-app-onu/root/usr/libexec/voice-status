@@ -1,0 +1,25 @@
+#!/bin/sh
+# Read-only voice status for the LuCI page. Keep it cheap and non-fatal.
+asterisk=0
+if command -v asterisk >/dev/null 2>&1 && pgrep -x asterisk >/dev/null 2>&1; then
+	asterisk=1
+fi
+
+regs=""
+if [ "$asterisk" = 1 ]; then
+	regs=$(asterisk -rx 'pjsip show registrations' 2>/dev/null | sed -n '1,6p' | tr '\n' ';')
+fi
+
+fxs=$(airoha-voice-ctl status 2>/dev/null | sed -n '1p')
+lec=$(cat /sys/module/en75xx_pcm/parameters/lec_enable 2>/dev/null || echo unknown)
+bypass=$(cat /sys/module/en75xx_pcm/parameters/lec_bypass 2>/dev/null || echo unknown)
+agc=$(cat /sys/module/en75xx_pcm/parameters/alc_enable 2>/dev/null || echo unknown)
+stats=$(cat /sys/kernel/debug/en75xx-pcm/stats 2>/dev/null | tr '\n' ';')
+
+printf 'asterisk=%s\n' "$asterisk"
+printf 'registrations=%s\n' "$regs"
+printf 'fxs=%s\n' "$fxs"
+printf 'lec=%s\n' "$lec"
+printf 'lec_bypass=%s\n' "$bypass"
+printf 'agc=%s\n' "$agc"
+printf 'stats=%s\n' "$stats"

@@ -589,6 +589,10 @@ write_network_config
 write_firewall_config
 reload_runtime
 
+if [ -x /usr/libexec/voice-asterisk ]; then
+	/usr/libexec/voice-asterisk apply || true
+fi
+
 if [ "$VN_ENABLED" -eq 1 ]; then
 	logger -t voice "Voice network applied (mode=$VN_MODE vlan=$VN_VLAN)"
 else

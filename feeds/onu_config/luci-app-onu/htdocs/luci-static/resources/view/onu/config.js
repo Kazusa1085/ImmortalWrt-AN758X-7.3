@@ -32,10 +32,12 @@ function asciiLength(minimum, maximum) {
 
 
 var LINE_MODE_DEFS = [
-	{ value: 'xgpon', label: _('XG-PON 10G/2.5G'), gpon: true },
-	{ value: 'xgspon', label: _('XGS-PON 10G/10G'), gpon: true },
-	{ value: 'epon-10g-1g', label: _('10G-EPON 10G/1G'), gpon: false },
-	{ value: 'epon-10g-10g', label: _('10G-EPON 10G/10G'), gpon: false }
+	{ value: 'gpon', label: _('GPON 2.5G/1.25G'), gpon: true, cal: 'a2' },
+	{ value: 'epon-1g', label: _('EPON 1.25G/1.25G'), gpon: false, cal: 'a2' },
+	{ value: 'xgpon', label: _('XG-PON 10G/2.5G'), gpon: true, cal: 'a2' },
+	{ value: 'xgspon', label: _('XGS-PON 10G/10G'), gpon: true, cal: 'a2' },
+	{ value: 'epon-10g-1g', label: _('10G-EPON 10G/1G'), gpon: false, cal: 'a0' },
+	{ value: 'epon-10g-10g', label: _('10G-EPON 10G/10G'), gpon: false, cal: 'a0' }
 ];
 
 function lineModeLabel(mode) {
@@ -74,11 +76,11 @@ function calibrationCapabilities(output) {
 
 function allowedLineModes(cap) {
 	if (cap.a0 && !cap.a2)
-		return LINE_MODE_DEFS.filter(function(m) { return !m.gpon; })
+		return LINE_MODE_DEFS.filter(function(m) { return m.cal === 'a0'; })
 			.map(function(m) { return m.value; });
 
 	if (!cap.a0 && cap.a2)
-		return LINE_MODE_DEFS.filter(function(m) { return m.gpon; })
+		return LINE_MODE_DEFS.filter(function(m) { return m.cal === 'a2'; })
 			.map(function(m) { return m.value; });
 
 	return LINE_MODE_DEFS.map(function(m) { return m.value; });
@@ -245,7 +247,7 @@ return view.extend({
 		if (cap.a0 && !cap.a2)
 			o.description = _('只有 A0 光校准有效，当前仅提供 10G-EPON 线路模式。');
 		else if (!cap.a0 && cap.a2)
-			o.description = _('只有 A2 光校准有效，当前仅提供 GPON 系列线路模式。');
+			o.description = _('只有 A2 光校准有效，当前仅提供 GPON / EPON 1G 线路模式。');
 		else if (!cap.a0 && !cap.a2)
 			o.description = _('未检测到有效的 A0/A2 光校准数据，线路模式不会被限制。');
 		else

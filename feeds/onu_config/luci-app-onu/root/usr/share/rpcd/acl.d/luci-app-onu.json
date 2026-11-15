@@ -59,6 +59,9 @@
         ],
         "/usr/libexec/network-opt-status": [
           "exec"
+        ],
+        "/usr/libexec/voice-status": [
+          "exec"
         ]
       }
     },
@@ -97,6 +100,12 @@
           "exec"
         ],
         "/usr/libexec/sfp-apply": [
+          "exec"
+        ],
+        "/usr/libexec/voice-apply *": [
+          "exec"
+        ],
+        "/usr/libexec/voice-asterisk *": [
           "exec"
         ]
       }

@@ -1,0 +1,113 @@
+#!/bin/sh
+# Generate the Asterisk PJSIP endpoint and outbound dialplan from onu-voice.
+# Only the generated include files are rewritten; packaged defaults stay intact.
+set -eu
+
+CFG=${VOICE_ASTERISK_CFG:-/etc/asterisk}
+PJSIP="$CFG/pjsip-en75xx.conf"
+DIALPLAN="$CFG/extensions-en75xx-generated.conf"
+RTPCONF="$CFG/rtp-en75xx.conf"
+
+uci_get() {
+	uci -q get "onu-voice.$1" 2>/dev/null || true
+}
+
+phone=$(uci_get config.phone_number)
+auth_user=$(uci_get config.auth_username)
+auth_pass=$(uci_get config.auth_password)
+registrar=$(uci_get sip.register_server)
+proxy=$(uci_get sip.proxy_server)
+outbound=$(uci_get sip.outbound_server)
+home=$(uci_get sip.home_domain)
+reg_port=$(uci_get sip.register_port)
+proxy_port=$(uci_get sip.proxy_port)
+transport=$(uci_get sip.register_transport)
+dtmf=$(uci_get config.dtmf_method)
+fax=$(uci_get config.fax_mode)
+sig_dscp=$(uci_get sip.signalling_dscp)
+media_dscp=$(uci_get sip.media_dscp)
+srtp=$(uci_get config.srtp)
+rtp_start=$(uci_get config.rtp_start)
+rtp_end=$(uci_get config.rtp_end)
+
+[ -n "$phone" ] || phone=1001
+[ -n "$auth_user" ] || auth_user=$phone
+[ -n "$reg_port" ] || reg_port=5060
+[ -n "$proxy_port" ] || proxy_port=5060
+[ -n "$transport" ] || transport=udp
+[ -n "$dtmf" ] || dtmf=InBand
+[ -n "$sig_dscp" ] || sig_dscp=0
+[ -n "$media_dscp" ] || media_dscp=0
+[ -n "$srtp" ] || srtp=none
+[ -n "$rtp_start" ] || rtp_start=10000
+[ -n "$rtp_end" ] || rtp_end=20000
+
+server=$registrar
+[ -n "$server" ] || server=$proxy
+[ -n "$server" ] || server=$outbound
+
+if [ -z "$server" ]; then
+	rm -f "$PJSIP" "$DIALPLAN" "$RTPCONF"
+	exit 0
+fi
+
+domain=$home
+[ -n "$domain" ] || domain=$server
+[ "$transport" = tls ] && pjsip_transport=transport-tls || pjsip_transport=transport-udp
+[ "$dtmf" = InBand ] && pjsip_dtmf=inband || pjsip_dtmf=rfc4733
+if [ "$fax" = t38 ]; then
+	fax_lines='t38_udptl=yes
+fax_detect=no'
+else
+	fax_lines='t38_udptl=no
+fax_detect=yes'
+fi
+sip_tos=$((sig_dscp * 4))
+rtp_tos=$((media_dscp * 4))
+
+tmp="$PJSIP.tmp"
+umask 077
+{
+	printf '; generated from onu-voice; do not edit\n'
+	printf '[transport-udp]\ntype=transport\nprotocol=udp\nbind=0.0.0.0:5060\ntos=%s\n\n' "$sip_tos"
+	if [ -n "$auth_pass" ]; then
+		printf '[en75xx-auth]\ntype=auth\nauth_type=userpass\nusername=%s\npassword=%s\n\n' "$auth_user" "$auth_pass"
+	fi
+	printf '[en75xx-aor]\ntype=aor\nmax_contacts=1\nremove_existing=yes\n\n'
+	printf '[en75xx-endpoint]\ntype=endpoint\ncontext=from-trunk\ndisallow=all\nallow=ulaw,alaw\n'
+	printf 'aors=en75xx-aor\n'
+	[ -n "$auth_pass" ] && printf 'auth=en75xx-auth\noutbound_auth=en75xx-auth\n'
+	printf 'from_user=%s\nfrom_domain=%s\ndirect_media=no\nrtp_symmetric=yes\nforce_rport=yes\nrewrite_contact=yes\n' "$auth_user" "$domain"
+	printf 'dtmf_mode=%s\n%s\ntos_audio=%s\n' "$pjsip_dtmf" "$fax_lines" "$rtp_tos"
+	case "$srtp" in
+		sdes) printf 'media_encryption=sdes\n' ;;
+		dtls) printf 'media_encryption=dtls\n' ;;
+		none|'') ;;
+	esac
+	printf '\n'
+	printf '[en75xx-registration]\ntype=registration\nserver_uri=sip:%s:%s\nclient_uri=sip:%s@%s\ncontact_user=%s\n' "$server" "$reg_port" "$auth_user" "$domain" "$phone"
+	[ -n "$proxy" ] && printf 'outbound_proxy=sip:%s:%s\\;lr\n' "$proxy" "$proxy_port"
+	printf 'transport=%s\nretry_interval=60\nforbidden_retry_interval=600\nexpiration=3600\n\n' "$pjsip_transport"
+} > "$tmp"
+chmod 0600 "$tmp"
+mv "$tmp" "$PJSIP"
+
+tmp="$DIALPLAN.tmp"
+umask 022
+{
+	printf '; generated from onu-voice; do not edit\n'
+	printf '[fxs-outbound]\nexten => _X.,1,Dial(PJSIP/${EXTEN}@en75xx,60)\n same => n,Hangup()\n'
+} > "$tmp"
+chmod 0644 "$tmp"
+mv "$tmp" "$DIALPLAN"
+
+umask 022
+tmp="$RTPCONF.tmp"
+printf '[general]\nrtpstart=%s\nrtpend=%s\n' "$rtp_start" "$rtp_end" > "$tmp"
+chmod 0644 "$tmp"
+mv "$tmp" "$RTPCONF"
+
+if command -v asterisk >/dev/null 2>&1 && [ -S /var/run/asterisk/asterisk.ctl ]; then
+	asterisk -rx 'dialplan reload' >/dev/null 2>&1 || true
+	asterisk -rx 'pjsip reload' >/dev/null 2>&1 || true
+fi

@@ -1,0 +1,14 @@
+#!/bin/sh
+# The Voice page is meaningful only on boards with FXS hardware. The default
+# menu file carries it; the no-voice variant is selected from board.json so the
+# same luci-app-onu package can be installed on all PON boards.
+M=/usr/share/luci/menu.d/luci-app-onu.json
+N=/usr/share/onu/luci-app-onu-no-voice.json
+
+[ -f "$M" ] && [ -f "$N" ] || exit 0
+
+voice="$(jsonfilter -i /etc/board.json -e '@.features.voice' 2>/dev/null)"
+[ "$voice" = "false" ] || exit 0
+
+cp "$N" "$M"
+exit 0

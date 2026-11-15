@@ -2,6 +2,7 @@
 
 'use strict';
 'require form';
+'require fs';
 'require network';
 'require uci';
 'require view';
@@ -37,6 +38,54 @@ function ensureStylesheet() {
 		'href': href,
 		'data-pon-stylesheet': ''
 	}));
+}
+
+
+function parseVoiceStatus(output) {
+	var status = {};
+
+	String(output || '').split('\n').forEach(function(line) {
+		var pos = line.indexOf('=');
+
+		if (pos > 0)
+			status[line.slice(0, pos)] = line.slice(pos + 1);
+	});
+
+	return status;
+}
+
+function voiceStatusCard(status) {
+	function value(name) {
+		var v = status[name];
+
+		return (v === undefined || v === '') ? '—' : v;
+	}
+
+	return E('div', { 'class': 'cbi-section' }, [
+		E('h3', {}, _('Voice runtime status')),
+		E('table', { 'class': 'table' }, [
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left', 'width': '30%' }, _('Asterisk')),
+				E('td', { 'class': 'td left' }, value('asterisk') === '1' ? _('running') : _('not running'))
+			]),
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, _('PJSIP registrations')),
+				E('td', { 'class': 'td left' }, value('registrations'))
+			]),
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, _('FXS line')),
+				E('td', { 'class': 'td left' }, value('fxs'))
+			]),
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, _('OSLEC / bypass / AGC')),
+				E('td', { 'class': 'td left' }, value('lec') + ' / ' + value('lec_bypass') + ' / ' + value('agc'))
+			]),
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, _('PCM stats')),
+				E('td', { 'class': 'td left' }, value('stats'))
+			])
+		])
+	]);
 }
 
 function validateFlashHookRange(sectionId, value) {
@@ -344,13 +393,16 @@ return view.extend({
 			network.getDevices(),
 			uci.load('onu-voice'),
 			uci.load('onu-internet'),
-			uci.load('onu-iptv')
+			uci.load('onu-iptv'),
+			fs.exec_direct('/usr/libexec/voice-status').catch(function() { return ''; })
 		]).then(function(results) {
-			return results[0];
+			return { devices: results[0], status: results[4] };
 		});
 	},
 
-	render: function(devices) {
+	render: function(state) {
+		var devices = (state || {}).devices || [];
+		var statusOutput = (state || {}).status || '';
 		var m, s, o, protocolOption, modeOption, lanPorts, trunkPorts, currentPort;
 		var dedicatedTaken, trunkTaken;
 
@@ -627,6 +679,48 @@ return view.extend({
 		o = s.option(form.Flag, 'echo_cancellation', _('Enable echo cancellation'),
 			_('Cancel the echo the phone side feeds back into the network.'));
 		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Flag, 'agc', _('Enable automatic gain control'),
+			_('Adapt receive level to the far-end speech. Disabled by default until the FXS path is calibrated.'));
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.Flag, 'lec_bypass', _('Bypass echo cancellation for fax'),
+			_('Disable OSLEC while fax or modem negotiation is active.'));
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.ListValue, 'country', _('Call-progress tone region'),
+			_('Country tone table used by Asterisk and the FXS line.'));
+		o.default = 'cn';
+		o.value('cn', _('China'));
+		o.value('us', _('United States'));
+		o.value('uk', _('United Kingdom'));
+		o.value('de', _('Germany'));
+		o.value('fr', _('France'));
+		o.value('jp', _('Japan'));
+		o.value('au', _('Australia'));
+		o.rmempty = false;
+
+		o = s.option(form.ListValue, 'srtp', _('SRTP mode'),
+			_('Encrypt SIP media. DTLS needs a certificate on the device.'));
+		o.default = 'none';
+		o.value('none', _('Disabled'));
+		o.value('sdes', _('SDES'));
+		o.value('dtls', _('DTLS'));
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'rtp_start', _('RTP port start'),
+			_('First UDP port used for RTP media.'));
+		o.datatype = 'port';
+		o.placeholder = '10000';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'rtp_end', _('RTP port end'),
+			_('Last UDP port used for RTP media.'));
+		o.datatype = 'port';
+		o.placeholder = '20000';
 		o.rmempty = false;
 
 		/* ---------------------------------------------------------------- *
@@ -999,6 +1093,7 @@ return view.extend({
 		o.rmempty = false;
 
 		return m.render().then(function(node) {
+			node.insertBefore(voiceStatusCard(parseVoiceStatus(statusOutput)), node.firstChild);
 			toggleProtocolSections(node, protocolOption, modeOption);
 			toggleVoiceEnabled(node);
 

@@ -22,6 +22,12 @@ config voice 'config'
 	option transmit_gain '0'
 	option receive_gain '0'
 	option echo_cancellation '1'
+	option agc '0'
+	option lec_bypass '0'
+	option country 'cn'
+	option srtp 'none'
+	option rtp_start '10000'
+	option rtp_end '20000'
 
 # The IP carrier under the voice service: an 8021q VLAN of the PON uplink,
 # kept out of br-lan and given a firewall zone of its own by voice-apply.

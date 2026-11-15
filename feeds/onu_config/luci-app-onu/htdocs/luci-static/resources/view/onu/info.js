@@ -103,6 +103,9 @@ return view.extend({
 		var calTable = calibrationTable(cal);
 
 		return E('div', {}, [
+			/* This page is read-only: hide the inherited CBI page actions. The
+			 * style node is scoped to this view and disappears with it. */
+			E('style', {}, '.cbi-page-actions { display: none !important; }'),
 			section(_('设备硬件信息'), [
 				row(_('型号'), info.model_name),
 				row(_('PON 序列号'), sn.value),
